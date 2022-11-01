@@ -1,0 +1,47 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Py: Train sentiment",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/sentimentModel.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train",
+                "--data_dir", "D:\\datasets\\LBR\\output_dataset\\dataset_2",
+                "--output_dir", "D:\\datasets\\LBR\\output_dataset\\new", 
+                "--n_epochs","3",
+                "--batch_size","10",
+                "--model_type", "SA"
+            ]
+        },
+        {
+            "name": "Py: Train NER",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/sentimentModel.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train",
+                "--data_dir", "D:\\datasets\\LBR\\output_dataset\\dataset_2",
+                "--output_dir", "D:\\datasets\\LBR\\output_dataset\\new", 
+                "--n_epochs","3",
+                "--batch_size","10",
+                "--model_type", "NER",
+                "--dataset_perc","0.001"
+            ]
+        },
+    ]
+}

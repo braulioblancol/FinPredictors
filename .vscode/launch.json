@@ -10,38 +10,356 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": false,
         },
         {
-            "name": "Py: Train sentiment",
+            "name": "Py: Train SA 1 year",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/sentimentModel.py",
+            "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
             "args": [
                 "--action", "train",
-                "--data_dir", "D:\\datasets\\LBR\\output_dataset\\dataset_2",
-                "--output_dir", "D:\\datasets\\LBR\\output_dataset\\new", 
-                "--n_epochs","3",
-                "--batch_size","10",
-                "--model_type", "SA"
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\models\\SA\\SA_1year1", 
+                "--labels", "Risk","_No_Risk",
+                "--n_epochs","5",
+                "--batch_size","15",
+                "--max_segments_bert","3",
+                "--model_type", "SA",
+                "--perc_data","0.015",
+                "--dense_model_type","5", 
+                "--balance_by_class", "-400",
+                "--filter_last_doc", "-1",
+                "--distrib_tool","pool",
+                //"--max_files", "10",
+                //"--tokenizer", "D:\\datasets\\LBR\\models\\tokenizers\\small\\local_bert-base-multilingual-uncased",
+                //"--model_dir", "D:\\datasets\\LBR\\models\\tokenizers\\small\\local_bert-base-multilingual-uncased\\bert-base-multilingual-uncased", 
+            ]
+        },
+        {
+            "name": "Py: Train SA 3 years",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\models\\SA\\SA_3year", 
+                "--n_epochs","5",
+                "--batch_size","2",
+                "--max_segments_bert","5",
+                "--labels", "Risk","_No_Risk",
+                "--model_type", "SA",
+                "--perc_data","0.10",
+                "--dense_model_type","4",
+                //"--optimizer","SGD",
+                "--balance_by_class", "-40",
+                "--filter_last_doc", "-2",
+                "--max_files","15",
+                "--lstm_hidden_layers","20",
+                "--distrib_tool","pool",
+                //"--tokenizer", "D:\\datasets\\LBR\\models\\tokenizers\\small\\local_bert-base-multilingual-uncased",
+                //"--model_dir", "D:\\datasets\\LBR\\models\\tokenizers\\small\\local_bert-base-multilingual-uncased\\bert-base-multilingual-uncased", 
             ]
         },
         {
             "name": "Py: Train NER",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/sentimentModel.py",
+            "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
             "args": [
                 "--action", "train",
-                "--data_dir", "D:\\datasets\\LBR\\output_dataset\\dataset_2",
-                "--output_dir", "D:\\datasets\\LBR\\output_dataset\\new", 
-                "--n_epochs","3",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\models\\NER\\NER8", 
+                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
+                "--n_epochs","10",
                 "--batch_size","10",
                 "--model_type", "NER",
-                "--dataset_perc","0.001"
+                "--perc_data","0.01",
+                "--y_top_n","40",
+                "--balance_by_class", "-100",
+                "--number_layers_freeze","8", 
+                "--terms_list","D:\\datasets\\LBR\\dataset_json\\frequent_terms.json",
+                "--model_dir","D:\\models_HPC\\models\\tokenizer_finbert_eng\\tt_dt100_dr10_lr1e5_c5\\bert-base-multilingual-uncased",
+                "--tokenizer","D:\\models_HPC\\models\\tokenizer_finbert_eng\\tt_dt100_dr10_lr1e5_c5",
+                "--normalization_column", "normalization"
             ]
         },
+        {
+            "name": "Py: Train NER FinBERT",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\NER\\finBERT", 
+                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
+                "--n_epochs","5",
+                "--batch_size","10",
+                "--model_type", "NER",
+                "--perc_data","0.10",
+                "--filter_lang","eng",
+                "--y_top_n","400",
+                "--number_layers_freeze","8", 
+                "--terms_list","D:\\datasets\\LBR\\dataset_json\\frequent_terms.json",
+                "--model_dir","FinBERT",
+                "--tokenizer","FinBERT"
+            ]
+        },
+        {
+            "name": "Py: Generate Train data NER",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train_generate_data",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\generated_data", 
+                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
+                "--n_epochs","10",
+                "--batch_size","10",
+                "--model_type", "NER",
+                "--perc_data","0.04",
+                "--y_top_n","400",
+                "--balance_by_class", "-100",
+                "--number_layers_freeze","8",
+                "--data_sel_position","last"
+            ]
+        },
+        {
+            "name": "Py: Generate Train data SA",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train_generate_data",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\models\\SA\\SA_3year", 
+                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
+                "--model_type", "SA",
+                "--perc_data","0.4",
+                "--dense_model_type","1",
+                "--balance_by_class", "-100",
+                "--number_layers_freeze","8",
+                "--filter_last_doc", "-3",
+            ]
+        },
+        {
+            "name": "Py: Test NER",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "test",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json", 
+                "--output_dir", "D:\\models_HPC\\models\\NER\\ner_95K_lr3e5_dr10_b30_best", 
+                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
+                "--model_type", "NER",
+                "--perc_data","0.02",
+                "--balance_by_class","-1000"
+            ]
+        },
+        {
+            "name": "Py: Test Sentiment",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "test",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\models\\SA\\SA_1year",  
+                "--model_type", "SA",
+                "--perc_data","0.0025",
+                "--y_label_type","risk_desc"
+            ]
+        },
+        {
+            "name": "Py: ROC Analysis",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "roc", 
+                "--data_dir", "D:\\datasets\\LBR\\models\\tokenizers\\SA",
+                "--output_dir", "D:\\datasets\\LBR\\models\\tokenizers\\SA",
+                "--title", "Sentiment Analysis",
+            ]
+        },
+        {
+            "name": "Py: Generate Bankruptcy Cia labels",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "risk_label_cia", 
+                "--output_dir", "D:\\datasets\\LBR\\generated_data",  
+            ]
+        },
+        {
+            "name": "Py: Generate Bankruptcy Doc labels",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "risk_label_doc", 
+                "--output_dir", "D:\\datasets\\LBR\\dataset_json",  
+            ]
+        },
+        {
+            "name": "Py: Generate DocListPerCia",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "doc_cias", 
+                "--output_dir", "D:\\datasets\\LBR\\generated_data",  
+            ]
+        },
+        {
+            "name": "Py: Explain NER Input",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "explain_input",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\models_HPC\\models\\NER\\ner_95K_lr3e5_dr10_b30_best", 
+                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
+                "--filter_lang","fra",
+                "--perc_data","0.01",
+                "--model_type", "NER",
+                "--y_top_n","9",
+                "--balance_by_class", "-10",   
+                "--model_dir","D:\\models_HPC\\models\\NER\\ner_95K_lr3e5_dr10_b30_best", 
+            ]
+        },
+        {
+            "name": "Py: Explain SA Input",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "explain_input",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\models_HPC\\models\\SA\\1y\\tbase_SA_ub20K_h200_m1_1y_b3",
+                "--model_dir","D:\\models_HPC\\models\\SA\\1y\\tbase_SA_ub20K_h200_m1_1y_b3", 
+                "--dataset_name","D:\\models_HPC\\models\\SA\\1y\\dataset_ub20K_1y_train_s10.pickle", 
+                "--max_samples","2",
+                "--max_significant_words","20",
+                "--total_steps","2"
+            ]
+        },
+        {
+            "name": "Py: Explain NER Layers",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "explain_layer",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\models_HPC\\models\\NER\\ner_95K_lr3e5_dr10_b30_best", 
+                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
+                "--filter_lang","fra",
+                "--perc_data","0.01",
+                "--model_type", "NER",
+                "--y_top_n","9",
+                "--balance_by_class", "-10",   
+                "--model_dir","D:\\models_HPC\\models\\NER\\ner_95K_lr3e5_dr10_b30_best", 
+            ]
+        },
+        {
+            "name": "Py: Check Data",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "check_doc_gap",
+                "--data_dir", "D:\\datasets\\LBR\\complete_dataset\\output_dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\complete_dataset\\output_dataset_json", 
+                "--file_path", "D:\\datasets\\LBR\\dataset_json\\documents_3y.txt",
+                "--files_dir", "D:\\datasets\\LBR\\original\\PDFs",
+                "--filter_list_path","D:\\datasets\\LBR\\documents_scope_filter.json"
+            ]
+        },
+        {
+            "name": "Py: Generate Links",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "genDocLinks", 
+                "--output_dir", "D:\\datasets\\LBR\\dataset_json", 
+                "--document_type_filter", "modification",
+                "--links_per_file", "60000",  
+            ]
+        },
+        {
+            "name": "Py: Generate Gap Links",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "docgaps_links", 
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json\\complete\\document_gap.json", 
+                "--output_dir", "D:\\datasets\\LBR\\dataset_json\\complete",  
+            ]
+        },
+        {
+            "name": "Py: Generate Normalization Amounts",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "genDocNoramlize",  
+                "--output_dir", "D:\\datasets\\LBR\\dataset_json\\",  
+            ]
+        },
+        {
+            "name": "Py: Split Doc Links",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "splitFile", 
+                "--data_dir", "D:\\datasets\\LBR\\total_docs_links20230314.txt", 
+                "--output_dir", "D:\\datasets\\LBR\\total_docs_links20230314",  
+                "--links_per_file", "100000"
+            ]
+        },
+        {
+            "name": "Py: Stats models",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "measure_models", 
+                "--data_dir", "D:\\temp\\models_dir.txt", 
+                "--output_dir", "D:\\temp\\"
+            ]
+        },
+        
+
     ]
 }

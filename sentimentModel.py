@@ -6,8 +6,12 @@ import gc
 import torch
 import torch.nn as nn
 from torch import optim
-from transformers import BertModel, BertTokenizer, BertForMaskedLM, AutoModelForSequenceClassification #, BertForSequenceClassification, AutoTokenizer
-from sklearn.metrics import precision_score, recall_score, accuracy_score, classification_report, f1_score, roc_auc_score, roc_curve, confusion_matrix
+from transformers import BertModel
+from transformers import BertTokenizer
+from transformers import BertForMaskedLM#, AutoModelForSequenceClassification #, BertForSequenceClassification, AutoTokenizer
+from torchmetrics import MetricCollection, F1Score, Accuracy, Precision, Recall, ConfusionMatrix
+from torchmetrics.classification import MulticlassAUROC
+#from sklearn.metrics import precision_score, recall_score, accuracy_score, classification_report, f1_score, roc_auc_score, roc_curve, confusion_matrix
 from collections import Counter
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,34 +19,78 @@ from pathlib import Path
 import pickle
 import statistics
 import math
+import neptune
+import timeit
+
+
+from transformers import  AutoModelForSequenceClassification
+
+import torch
+
+#credentials
+neptune_project_id = "braulioc17/SA2label2y"
+neptune_project_token = "eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiIwMTBkZDg5MC1iOTIyLTQyMGItOTk0MS0xMGJjMDJmMjYwZjgifQ==" 
+
 
 class Object(object):
     pass
 
 class CustomBERTModel(nn.Module):
     
-    def __init__(self, number_labels = 2, device=None, model_type='SA', dropout_perc = 0.1, is_bert_lstm=None, hidden_layers=5, lstm_sequence_length=15, stacked_lstm_layers=1, tokenizer=None, local_model_location = None, dense_model_type=0, lambda1 = 512, lambda2 = 256):
+    def __init__(self, number_labels = None, device=None, model_type=None, dropout_perc = 0.1, is_bert_lstm=None, hidden_layers=None, lstm_sequence_length=None, stacked_lstm_layers=1, tokenizer=None, local_model_location = None, dense_model_type=0, lambda1 = 512, lambda2 = 256, transfer_weights=None, idx2labels =None, labels2idx=None):
         super(CustomBERTModel, self).__init__()
         if device is None:
+            self.local_model_location = local_model_location
+            self.tokenizer = tokenizer
+            self.transfer_weights = transfer_weights
             return
-        self.args = {'number_labels':number_labels,'device':device,'dropout_perc':dropout_perc, 'model_type': model_type, 'is_bert_lstm': is_bert_lstm, 'hidden_layers':hidden_layers, 'lstm_sequence_length':lstm_sequence_length,'stacked_lstm_layers':stacked_lstm_layers,'tokenizer':tokenizer, 'local_model_location':local_model_location,'dense_model_type':dense_model_type}
+        
+        self.initialize_models(number_labels, device, model_type, dropout_perc, is_bert_lstm, hidden_layers, lstm_sequence_length, stacked_lstm_layers, tokenizer, local_model_location, dense_model_type, lambda1, lambda2, transfer_weights,idx2labels,labels2idx)
+
+    def initialize_models(self, number_labels, device, model_type, dropout_perc, is_bert_lstm, hidden_layers, lstm_sequence_length, stacked_lstm_layers, tokenizer, local_model_location, dense_model_type, lambda1, lambda2, transfer_weights,idx2labels,labels2idx,do_quantization = False, do_peft=False):
+        
+        self.args = {'number_labels':number_labels,'device':device,'dropout_perc':dropout_perc, 'model_type': model_type, 'is_bert_lstm': is_bert_lstm, 'hidden_layers':hidden_layers, 'lstm_sequence_length':lstm_sequence_length,'stacked_lstm_layers':stacked_lstm_layers,'tokenizer':tokenizer, 'local_model_location':local_model_location,'dense_model_type':dense_model_type,'idx2labels':idx2labels,'labels2idx':labels2idx}
         self.model_type = model_type
         self.num_labels = number_labels
         self.lstm_sequence_length = lstm_sequence_length
         self.lstm_hidden_layers = hidden_layers
         self.stacked_lstm_layers = stacked_lstm_layers
-
+        self.idx2labels = idx2labels
+        self.labels2idx = labels2idx
+        print('Do quantization : ')
+        print(do_quantization)
+        print('Do do_peft : ')
+        print(do_peft)
+        
         if local_model_location is not None: 
             if local_model_location == 'FinBERT':
-                self.bert = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert",num_labels=number_labels, ignore_mismatched_sizes=True)
+                print('finbert')
+                #self.bert = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert",num_labels=number_labels, ignore_mismatched_sizes=True)
             else:
-                bert_masked = BertForMaskedLM.from_pretrained(local_model_location, output_hidden_states = True,)   
-                self.bert = BertModel.from_pretrained("bert-base-multilingual-uncased", output_hidden_states = True,)
-                self.bert.resize_token_embeddings(len(tokenizer))
-                for target_embeddings, weights_masked in zip(self.bert.embeddings.parameters(),bert_masked.bert.embeddings.parameters()):
-                    target_embeddings.data.copy_(weights_masked.clone())
-                print("Weights cloned from tokenizer's embedding")
-                bert_masked = None
+                default_model_name = "bert-base-multilingual-uncased"
+                if do_quantization:
+                    self.bert = self.get_quantized_model(model_name=default_model_name)
+                else:
+                    self.bert = BertModel.from_pretrained(default_model_name, output_hidden_states = True,)
+                
+                if do_peft:
+                    self.bert  = self.get_peft_model(model=self.bert)
+
+                    
+                try:
+                    self.bert.resize_token_embeddings(len(tokenizer))
+                except:
+                    tokenizer = BertTokenizer.from_pretrained(default_model_name)
+
+                if transfer_weights:
+                    bert_masked = BertForMaskedLM.from_pretrained(local_model_location, output_hidden_states = True,)   
+                    for target_embeddings, weights_masked in zip(self.bert.embeddings.parameters(), bert_masked.bert.embeddings.parameters()):
+                        target_embeddings.data.copy_(weights_masked.clone())
+                    print("Weights cloned from tokenizer's embedding")
+                    for target_embeddings, weights_masked in zip(self.bert.encoder.parameters(), bert_masked.bert.encoder.parameters()):
+                        target_embeddings.data.copy_(weights_masked.clone())
+                    print("Weights cloned from tokenizer's encoder weights")
+                    bert_masked = None
         else:
             self.bert = BertModel.from_pretrained("bert-base-multilingual-uncased", output_hidden_states = True,)
             if tokenizer is not None and len(tokenizer) != self.bert.embeddings.word_embeddings.num_embeddings:
@@ -61,7 +109,6 @@ class CustomBERTModel(nn.Module):
         self.is_finbert = False
         self.device = device
         self.dense_model_type = dense_model_type
-
 
         if local_model_location == 'FinBERT':
             self.is_finbert = True
@@ -87,13 +134,16 @@ class CustomBERTModel(nn.Module):
                         self.classifier = nn.Linear(hidden_layers, self.num_labels)
                     else:
                         self.dense3 = nn.Linear(hidden_layers*stacked_lstm_layers, lambda1)
+                        self.dense3.to(device)
                         self.dense4 = nn.Linear(lambda1, lambda2)
+                        self.dense4.to(device)
                         self.classifier = nn.Linear(lambda2, self.num_labels)
 
                 elif dense_model_type==2:
                     self.lstm = nn.LSTM(input_size=self.bert.config.hidden_size, hidden_size=hidden_layers, num_layers=1, bias=True, batch_first=True, dropout=self.dropout_perc)
                     self.lstm.to(device)
                     self.dense1 = nn.Linear(hidden_layers, lambda2)
+                    self.dense1.to(device)
                     self.classifier = nn.Linear(lambda2, self.num_labels)
                 elif dense_model_type==4 or dense_model_type==5:
                     if dense_model_type==4:
@@ -126,17 +176,63 @@ class CustomBERTModel(nn.Module):
                     else:
                         lambda5 = int(lambda4/2)
                         self.dense5 = nn.Linear(lambda4, lambda5)
+                        self.dense5.to(device)
                         self.classifier = nn.Linear(lambda5, self.num_labels)
             else:
                 self.classifier = nn.Linear(self.bert.config.hidden_size, self.num_labels)
             self.classifier.to(device)
-
+    '''
     def init_hidden_lstm(self, batch_size):
         print('Reinitialization of hidden lstm')
         h0 = torch.zeros((self.stacked_lstm_layers, batch_size, self.lstm_hidden_layers)).detach().to(self.device)
         c0 = torch.zeros((self.stacked_lstm_layers, batch_size, self.lstm_hidden_layers)).detach().to(self.device)
         hidden = (h0,c0)
         return hidden
+
+    '''
+    
+    def get_quantized_model(self, use_4bit = True, bnb_4bit_compute_dtype = "float16", bnb_4bit_quant_type = "nf4", use_nested_quant = False, model_name=None):
+        from transformers import BitsAndBytesConfig
+
+        device_map = {"": 0}
+        compute_dtype = getattr(torch, bnb_4bit_compute_dtype)
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=use_4bit,
+            bnb_4bit_quant_type=bnb_4bit_quant_type,
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=use_nested_quant,
+        )
+        # Check GPU compatibility with bfloat16
+        if compute_dtype == torch.float16 and use_4bit:
+            major, _ = torch.cuda.get_device_capability()
+            if major >= 8:
+                print("=" * 80)
+                print("Your GPU supports bfloat16: accelerate training with bf16=True")
+                print("=" * 80)
+        
+        
+        model = AutoModelForSequenceClassification.from_pretrained(model_name,quantization_config=bnb_config,device_map=device_map)
+        return model
+    
+    def get_peft_model(self, lora_alpha = 32, lora_r = 16, lora_dropout = 0.05, model=None):
+        from peft import LoraConfig, get_peft_model, TaskType
+
+        # Define LoRA Config
+        lora_config = LoraConfig(
+                        lora_alpha=lora_alpha,
+                        lora_dropout=lora_dropout,
+                        r=lora_r,
+                        bias="none",
+                        task_type=TaskType.SEQ_CLS, # this is necessary
+                        target_modules=["query", "value"],
+                        inference_mode=True
+                        )
+
+        model = get_peft_model(model, lora_config)
+        print(model.print_trainable_parameters()) # see % trainable parameters
+
+        return model
+
 
     def forward(
             self,
@@ -214,7 +310,9 @@ class CustomBERTModel(nn.Module):
                         dense_output = self.dense6(dense_output)
                         logits = self.classifier(dense_output)                    
                     else:
-                        dense_output = self.dense5(dense_output.view(batch_size,dense_output.shape[-1]*self.stacked_lstm_layers))
+                        input_o = dense_output.view(batch_size,dense_output.shape[-1]*self.stacked_lstm_layers)
+                        print(input_o.device)
+                        dense_output = self.dense5(input_o)
                         logits = self.classifier(dense_output)  
                 else: 
                     _, (hidden_last,_) =  self.lstm(sequence_output, lstm_hidden) # hidden 
@@ -260,8 +358,14 @@ class CustomBERTModel(nn.Module):
 
     def from_pretrained(self, model_dir):
         args = torch.load(os.path.join(model_dir, "training_args.bin"))
-        print('Loading from pre-trained model ', args)
-        model_file = os.path.join(model_dir, "pytorch_model.bin")
+        #print('Loading from pre-trained model ', args)
+        #model_file = os.path.join(model_dir, "pytorch_model.bin") 
+        if self.tokenizer is not None: 
+            if type(self.tokenizer==str):
+                args['tokenizer'] = BertTokenizer.from_pretrained(self.tokenizer)
+            else:
+                args['tokenizer'] = self.tokenizer
+        if self.local_model_location is not None: args['local_model_location'] = self.local_model_location
         model = CustomBERTModel(**args)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.load_state_dict(torch.load(os.path.join(model_dir,'pytorch_model.bin'), map_location=torch.device(device)))
@@ -275,7 +379,8 @@ class CustomBERTModel(nn.Module):
         # Only save the model itself if we are using distributed training
         model_to_save = self.module if hasattr(self, "module") else self
 
-        # Attach architecture to the config
+        # Attach architecture to the co
+        # nfig
         output_model_file = os.path.join(output_dir, "pytorch_model.bin")
         torch.save(model_to_save.state_dict(), output_model_file)
 
@@ -303,7 +408,7 @@ class CustomBERTModel(nn.Module):
         return new_dataset
 
 
-def get_model(action, data_dir, output_dir, num_labels, device, lstm_args, model_type=None, tokenizer=None, dropout_perc=None,local_model_location=None,dense_model_type=0):
+def get_model(action, data_dir, output_dir, num_labels, device, lstm_args, model_type=None, tokenizer=None, dropout_perc=None,local_model_location=None,dense_model_type=0,idx2labels=None, labels2idx=None):
     model_dir = os.path.join(data_dir, output_dir)
     model = None
     last_epoch = -1
@@ -319,13 +424,13 @@ def get_model(action, data_dir, output_dir, num_labels, device, lstm_args, model
         if model is None:
             if local_model_location is None:
                 local_model_location = "bert-base-multilingual-uncased"
-                print('Loading bert-base-multilingual-uncased model')
+                print('For downloading bert-base-multilingual-uncased model')
             elif local_model_location.lower() == "finbert":
                 local_model_location = 'FinBERT'
                 print('Loading FinBERT model')
             else:
                 print('Loding model from local directory',local_model_location)
-            model = CustomBERTModel(device=device, number_labels=num_labels,is_bert_lstm= lstm_args.is_bert_lstm,hidden_layers= lstm_args.hidden_layers,lstm_sequence_length= lstm_args.lstm_sequence_length,stacked_lstm_layers=lstm_args.stacked_lstm_layers, tokenizer=tokenizer, dropout_perc=dropout_perc, local_model_location=local_model_location,dense_model_type=dense_model_type)
+            model = CustomBERTModel(device=device, number_labels=num_labels,is_bert_lstm= lstm_args.is_bert_lstm,hidden_layers= lstm_args.hidden_layers,lstm_sequence_length= lstm_args.lstm_sequence_length,stacked_lstm_layers=lstm_args.stacked_lstm_layers, tokenizer=tokenizer, dropout_perc=dropout_perc, local_model_location=local_model_location,dense_model_type=dense_model_type, idx2labels =idx2labels, labels2idx=labels2idx)
         model.train()
     elif action == 'test': 
         model = CustomBERTModel().from_pretrained( model_dir=model_dir)
@@ -374,25 +479,28 @@ def drawLabelsDistributionPerStep(labels, batch_size,output_dir, file_name):
         plt.savefig(os.path.join(output_dir,file_name + '.jpg'))
 
 def set_no_grad(model, number_layers_freeze, is_train):
-    requires_grad = True if is_train else False
-    for param in model.bert.parameters():
-        param.requires_grad = requires_grad
+    if not is_train:
+        for param in model.bert.parameters(): #encoder and embeddings
+            param.requires_grad = False
+        return
     
     if number_layers_freeze >0 and is_train and 'finbert' not in model.bert.name_or_path:
-        if number_layers_freeze > 12:
+        if number_layers_freeze > 12 or number_layers_freeze <0:
             print('Freezing all BERT layers.')
             for param in model.bert.parameters():
                 param.requires_grad = False
-        else:
-            print('Freezing the first:', number_layers_freeze, 'layers of BERT.')
+        else:                
+            
+            print('Unfreezing encoders layer from', number_layers_freeze, 'out of',len(model.bert.encoder.layer))
             for param in model.bert.embeddings.parameters():
-                param.requires_grad = False
-            for i_layer in range(min(number_layers_freeze, 12)):
-                for param in model.bert.encoder.layer[i_layer].parameters():
-                    param.requires_grad = False
+                param.requires_grad = False # Do not train embeddings
+
+            for i_layer in range(number_layers_freeze, 12):
+                for param in model.bert.encoder.layer[i_layer].parameters(): #only encoders, embeddings always requires_grad=False
+                    param.requires_grad = True
 
 
-def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batch_size, n_epochs, is_bert_lstm, lstm_sequence_length,lstm_hidden_layers, lstm_stacked_layers, fast_break, model_type=None, tokenizer=None, debug_gpu_memory=False, optimizer=None, dropout_perc=None, number_layers_freeze=12,local_model_location=None,dense_model_type=None):
+def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batch_size, n_epochs, is_bert_lstm, lstm_sequence_length,lstm_hidden_layers, lstm_stacked_layers, fast_break, model_type=None, tokenizer=None, debug_gpu_memory=False, optimizer=None, dropout_perc=None, number_layers_freeze=0,local_model_location=None,dense_model_type=None, run_id=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
     lstm_args = Object()
@@ -402,8 +510,10 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
     lstm_args.stacked_lstm_layers = lstm_stacked_layers 
     
     global_step = 0
+    print(f'lstm_args: is_bert_lstm: {lstm_args.is_bert_lstm}, lstm_sequence_length:{lstm_args.lstm_sequence_length}, hidden_layers:{lstm_args.hidden_layers}, stacked_lstm_layers:{lstm_args.stacked_lstm_layers}')  
     print('Using ' + device.type, device_name) 
     num_labels = len(dataset.train.labels2idx)
+    
     print('Having ', num_labels, 'classes.')
     print('Learning rate ', learning_rate)
 
@@ -414,8 +524,10 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
         last_epoch = -1
         n_epochs = 1
     
+    tokenizer = dataset.get_tokenizer(tokenizer)
+    
+    model, last_epoch = get_model(action=action, data_dir=data_dir, output_dir=output_dir, device=device, num_labels=num_labels, lstm_args=lstm_args, model_type=model_type, tokenizer=tokenizer, dropout_perc=dropout_perc,local_model_location=local_model_location,dense_model_type=dense_model_type,idx2labels=dataset.train.idx2labels, labels2idx=dataset.train.labels2idx)
 
-    model, last_epoch = get_model(action=action, data_dir=data_dir, output_dir=output_dir, device=device, num_labels=num_labels, lstm_args=lstm_args, model_type=model_type, tokenizer=tokenizer, dropout_perc=dropout_perc,local_model_location=local_model_location,dense_model_type=dense_model_type)
     
     if optimizer is None or "Adam" in optimizer:
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
@@ -424,9 +536,6 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
     elif optimizer == "RMSprop":
         optimizer = optim.RMSprop(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
     
-    #if action =='train':
-    #    drawLabelsDistributionPerStep(dataset.all_label_ids_no_shuffled, batch_size, output_dir, 'class_dist_steps_no_shuffled' + action)
-    #drawLabelsDistributionPerStep(dataset.all_label_ids, batch_size, output_dir,'class_dist_steps_shuffled_'+ action)
     
     if not is_train:
         dataset.val = dataset.test 
@@ -462,13 +571,20 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
     if last_epoch+1 == n_epochs: print('Total number of epochs reached (',n_epochs,")")
     print_memory = torch.cuda.is_available() and debug_gpu_memory 
     loss_historical = {}
-    
+    classes_list = dataset.train.labels2idx
+
+    param_log=  {"learning_rate": learning_rate, "optimizer": optimizer, "epochs":n_epochs, "batch_size":batch_size,"global_steps":global_step,
+                "device":device, "dropout":dropout_perc,"training_records":len(dataset.train.all_input_ids), "testing_records":len(dataset.val.all_input_ids), 
+                "n_layers_freeze":number_layers_freeze, "optimizer":optimizer,"lstm_sequence_length":lstm_sequence_length,"device":str(device.type), "device_name":device_name,
+                "hidden_layers":lstm_hidden_layers,"stacked_lstm_layers":lstm_stacked_layers, "model_type":dense_model_type,'num_labels':num_labels,'labels':dataset.train.labels2idx}
+
+
     for epoch in range(last_epoch+1, n_epochs):
         loss_historical[epoch] = []
         print('New epoch ', epoch) 
         if is_train:
             if number_layers_freeze >0:
-                set_no_grad(model, number_layers_freeze, is_train)
+                set_no_grad(model, number_layers_freeze, is_train) 
 
             print('Start training...')
             epoch_loss = 0.0
@@ -492,8 +608,10 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
             min_loss = 100
             small_step = 0
             i_nonproc_batch = 0
-            current_loss =0
+            current_loss = None
+            ypred_logits = []
             for i_start in loop:
+                training_time = timeit.default_timer()
                 loop.set_description(f'Epoch {epoch}') 
                 #with torch.set_grad_enabled(True):
                 optimizer.zero_grad() #nueva linea
@@ -526,19 +644,26 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
 
                 #calculate loss.
                 current_loss = outputs['loss']
-                currrent_loss_f = current_loss.item()
-                epoch_loss += currrent_loss_f
-                loss_historical[epoch].append(currrent_loss_f)
+                current_loss_f = current_loss.item()
+                epoch_loss += current_loss_f
+                loss_historical[epoch].append(current_loss_f)
 
-                loop.set_postfix(loss=currrent_loss_f)
+                loop.set_postfix(loss=current_loss_f) 
                 #calculate accuracy and keep  for metrics
-                pred_label_batch = outputs['logits'].argmax(-1).detach().cpu().numpy()
+                pred_label_classes =outputs['logits'].detach().cpu().numpy()
+                
+                if is_bert_lstm:
+                    ypred_logits.extend(list(pred_label_classes))
+                else:
+                    ypred_logits.extend(list(pred_label_classes))
+
+                pred_label_batch = pred_label_classes.argmax(-1)
                 y_label_batch = labels.detach().cpu().numpy()
 
-                if not (currrent_loss_f >1 and min_loss < 3): 
-                #print(i_start,'Loss increase', pred_label_batch, 'should be: ',labels,'Loss:', currrent_loss_f)
+                if not (current_loss_f >1 and min_loss < 3): 
+                #print(i_start,'Loss increase', pred_label_batch, 'should be: ',labels,'Loss:', current_loss_f)
                 #else:
-                    min_loss = currrent_loss_f
+                    min_loss = current_loss_f
 
                 #backward pass
                 current_loss.backward()
@@ -578,13 +703,11 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
                     check_ = {item:0 for item in pred_label_batch}
                     if len(check_)==1 and len({item:0 for item in y_label_batch}) >1:
                         print('Training: All classes were predicted as ',list(check_.keys())[0],' having as labels', y_label_batch)
-
-                if fast_break and i_start > 200: break
-            
+        
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                    
+                
 
             print('Finished epoch. Computing accuracy...')
         
@@ -594,12 +717,14 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
     
             model.save_pretrained(output_dir)
             print('Saved pretrained model in ' + output_dir)
-    
-            write_metrics(labels_list, preds_list, output_dir, action, model_type, global_step, len(dataset.train.all_input_ids), device, n_epochs, epoch, current_loss=current_loss, weights = dataset.train.weights, split_type=action)
+            
+            training_time = timeit.default_timer() - training_time    
 
-            print('Confusion Matrix:')
-            print(dataset.train.labels2idx)
-            print(confusion_matrix(labels_list, preds_list, labels=np.arange(len(dataset.train.labels2idx))))
+            write_metrics(labels_list, preds_list, ypred_logits, classes_list, output_dir, action, model_type, global_step, len(dataset.train.all_input_ids), device, n_epochs, epoch, current_loss=current_loss, weights = dataset.train.weights, split_type=action,run_id=run_id, param_log=param_log,historical_loss=loss_historical[epoch], runing_time=training_time)
+
+            #print('Confusion Matrix:')
+            #print(dataset.train.labels2idx)
+            #print(ConfusionMatrix(labels_list, preds_list, labels=np.arange(len(dataset.train.labels2idx))))
 
             draw_loss(output_dir, loss_historical)
 
@@ -609,7 +734,8 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
         labels_list_val = []
         ypred_logits = []
         ytruth_logits = []
-        
+        historical_loss_val = []
+        total_loss_val =0
         batch_size_steps = lstm_args.lstm_sequence_length*batch_size*lstm_args.stacked_lstm_layers if lstm_args.is_bert_lstm else batch_size
         small_step = 0
         i_nonproc_batch = 0
@@ -617,6 +743,7 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
             #torch.cuda.clear_memory_allocated() #entirely clear all allocated memory
 
             with torch.set_grad_enabled(False):
+                testing_time = timeit.default_timer()
                 i_end = i_start + batch_size_steps
                 
                 input_ids = dataset.val.all_input_ids[i_start:i_end]
@@ -646,13 +773,18 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
 
                 
                 #calculate accuracy and keep  for metrics 
-                pred_label_batch = outputs['logits'].detach().cpu().numpy()
+                pred_label_classes =outputs['logits'].detach().cpu().numpy() 
+                current_loss = outputs['loss']
+                current_loss_val_f = current_loss.item()
+                total_loss_val += current_loss_val_f  
+                historical_loss_val.append(current_loss_val_f)
+                
                 if is_bert_lstm:
-                    ypred_logits.extend(list(pred_label_batch))
+                    ypred_logits.extend(list(pred_label_classes))
                 else:
-                    ypred_logits.extend(list(pred_label_batch))
+                    ypred_logits.extend(list(pred_label_classes))
 
-                pred_label_batch = pred_label_batch.argmax(-1)
+                pred_label_batch = pred_label_classes.argmax(-1)
 
                 y_label_batch = labels.detach().cpu().numpy()
                 #if is_bert_lstm:
@@ -683,10 +815,11 @@ def runSentimentModel(dataset, action, data_dir, output_dir, learning_rate, batc
 
     
         split_type = 'val' if action =='train' else 'test'
-        print('Confusion Matrix:')
-        print(dataset.train.labels2idx)
-        print(confusion_matrix(labels_list_val, preds_list_val, labels=np.arange(len(dataset.train.labels2idx))))
-        write_metrics(labels_list_val, preds_list_val, output_dir, action, model_type, 0, len(dataset.val.all_input_ids), device, n_epochs, epoch, current_loss=None, weights = dataset.train.weights, split_type=split_type)
+        #print('Confusion Matrix:') 
+        #print(dataset.train.labels2idx)
+        #print(ConfusionMatrix(labels_list_val, preds_list_val, labels=np.arange(len(dataset.train.labels2idx))))
+
+        write_metrics(labels_list_val, preds_list_val, ypred_logits, classes_list, output_dir, action, model_type, 0, len(dataset.val.all_input_ids), device, n_epochs, epoch, current_loss=current_loss, weights = dataset.train.weights, split_type=split_type,run_id=run_id, param_log=param_log,historical_loss=historical_loss_val, runing_time= testing_time)
         write_logits(ytruth_logits, ypred_logits, number_classes, dataset.train.weights, output_dir)
 
 def draw_auc(ytruth, ypred, number_classes, weights):
@@ -699,7 +832,8 @@ def draw_auc(ytruth, ypred, number_classes, weights):
             weights_list.append(weights[np.argmax(y_pred_item)])
         else:
             print('')
-    return roc_auc_score(y_true= ytruth,y_score = y_pred_prob,sample_weight = weights_list, multi_class='ovr')
+    metrics = MulticlassAUROC(num_classes=number_classes, average="weighted", thresholds=None)
+    return  metrics #roc_auc_score(y_true= ytruth,y_score = y_pred_prob,sample_weight = weights_list, multi_class='ovr')
 
 def runROCAnalysis(models_directory, output_dir, title):
     auc_score_list = {}
@@ -753,24 +887,48 @@ def draw_loss(output_dir, loss_historical):
     plt.savefig(os.path.join(output_dir,'training_loss.jpg'))
         
         
-def write_metrics(labels_list, preds_list, output_dir, action, model_type, global_steps, dataset_length, device, n_epochs, current_epoch, current_loss=None, weights = None, split_type=None):
-    _accuracy = accuracy_score(labels_list, preds_list)
-    _precision = precision_score(labels_list, preds_list, average='weighted')
-    _recall =  recall_score(labels_list, preds_list, average='weighted')
-    _f1 = f1_score(labels_list, preds_list, average='weighted')
+def write_metrics(labels_list, preds_list, ypred_logits, classes_list, output_dir, action, model_type, global_steps, dataset_length, device, n_epochs, current_epoch, current_loss=None, weights = None, split_type=None,run_id=None, param_log=None,historical_loss=None, runing_time=None):
+    number_classes = len(classes_list)
+    accuracy_ = Accuracy(task='multiclass', num_classes=number_classes)
+    precision_ = Precision(task='multiclass',num_classes=number_classes, average='weighted')
+    recall_ = Recall(task='multiclass',num_classes=number_classes, average='weighted')
+    f1_score_ = F1Score(task='multiclass', num_classes=number_classes, average='weighted')
+    metric_collection = MetricCollection({
+                        'accuracy': accuracy_,
+                        'precision': precision_,
+                        'recall': recall_,
+                        'f1':f1_score_,
+                        'confusionMatrix':ConfusionMatrix(task='multiclass',num_classes=number_classes)
+    }) 
+    metrics = metric_collection(torch.tensor(preds_list),torch.tensor(labels_list))
+    metricsAUCROC_all = MulticlassAUROC(num_classes=number_classes, average=None, thresholds=None)
+    reesultsAUCROC_all = metricsAUCROC_all(torch.tensor(ypred_logits),torch.tensor(labels_list))
+    auc_roc = [item.item() for item in reesultsAUCROC_all]
+    
+    metricsAUCROC_avg_w = MulticlassAUROC(num_classes=number_classes, average='weighted', thresholds=None)
+    reesultsAUCROC_avg_w = metricsAUCROC_avg_w(torch.tensor(ypred_logits),torch.tensor(labels_list))
+ 
     _loss = float(current_loss.data) if current_loss is not None else 0
     print('Epoch:' + str(current_epoch) + "/" + str(n_epochs-1) + ":")
-    print(split_type + " accuracy: ", str(_accuracy))
-    print(split_type + " F1: ", str(_f1))
+    print(split_type + " accuracy: ", str(metrics['accuracy'].item()))
+    print(split_type + " F1: ", str(metrics['f1'].item()))
+    print('Confusion Matrix:')
+    print(classes_list)
+    print(metrics['confusionMatrix'])
+
+    print('ROC AUC: ', auc_roc)
+    print('ROC AUC Averaged: ', sum(auc_roc)/len(auc_roc))
+    print('ROC AUC weighted: ', reesultsAUCROC_avg_w.item())
+
     filename, results = read_metrics(output_dir, model_type, action)
     
     with open(filename, 'wb') as f:
         current_metrics =    {"type": split_type,
-                            "precision": _precision,
-                            "recall":_recall,
-                            "f1": _f1,
+                            "precision": metrics['precision'].item(),
+                            "recall":metrics['recall'].item(),
+                            "f1": metrics['accuracy'].item(),
                             'loss': _loss,
-                            'accuracy': _accuracy,
+                            'accuracy': metrics['accuracy'].item(),
                             'global_steps': global_steps,
                             'dataset_length': dataset_length, 
                             'device': device.type,
@@ -783,6 +941,22 @@ def write_metrics(labels_list, preds_list, output_dir, action, model_type, globa
         #f.write(',\n'.join(str(result_metrics).split(',')))
         print("Saved:", f.name)
 
+    if run_id is None:
+        run = neptune.init_run(project=neptune_project_id, api_token= neptune_project_token) 
+    else: 
+        run = neptune.init_run(project=neptune_project_id, api_token= neptune_project_token, custom_run_id=run_id) 
+        
+    if param_log is not None:
+        run["model/parameters"] = param_log
+
+    run[split_type + "/epoch/loss"].extend(historical_loss) 
+    run[split_type + "/epoch/accuracy"].append(accuracy_)
+    run[split_type + "/epoch/f1_score"].append(f1_score_)
+    run[split_type + "/epoch/precision"].append(precision_)
+    run[split_type + "/epoch/recall"].append(recall_)
+    run[split_type + "/epoch/time"].append(runing_time)
+ 
+    run.stop()
    
 def write_logits(y_truth, preds_list, number_classes, weights, output_directory):   
     filename = os.path.join(output_directory,Path(output_directory).stem + ".pickle")

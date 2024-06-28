@@ -4,6 +4,16 @@ from collections import Counter
 import numpy as np
 
 
+
+
+with open("D:\\datasets\\train_dataset_s3.pickle", 'rb') as f: 
+    dataset = pickle.load(f)
+
+for item in dataset:
+    print('')
+print('')
+
+
 with open('D:\\datasets\\LBR\\dataset_json\\text_doc.txt','r',encoding='utf-8') as f:
     dataset_docs = f.readlines()
 

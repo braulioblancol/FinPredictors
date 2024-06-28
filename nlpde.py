@@ -18,7 +18,6 @@ import re
 import torch
 import multiprocessing as mp
 import ray
-from Levenshtein import distance as lev
 from torch.utils.data import Dataset
 from collections import Counter 
 import math
@@ -31,7 +30,7 @@ import fitz
 import pikepdf
 from bs4 import BeautifulSoup
 from ray.util.multiprocessing.pool import Pool
-from sklearn.utils.class_weight import compute_class_weight
+#from sklearn.utils.class_weight import compute_class_weight 
 import gc 
 
 from transformers import BertTokenizer,AutoTokenizer
@@ -50,6 +49,18 @@ PRETRAINED_VOCAB_FILES_MAP = {
 langs = {'fra':'fr','eng':'en','deu':'de'}
 
 async_semaphore = None
+
+def get_special_tokens(as_vector = False):
+    special_tokens = {'number': "[NUMBER]", 'date': "[DATE]", 'phone': "[PHONE]",'percentage':"[PERC]",'code':"[CODE]", 'positive': "[POSITIVE]", 'negative': "[NEGATIVE]","small":"[SMALL]","big":"[BIG]"}
+    sizes_log = {'small':'SMALL','big':'BIG'}
+    for exp_log in range(1, 10):
+        for size_log in sizes_log:
+            special_tokens[size_log + "_number" + str(exp_log)] ="["+ sizes_log[size_log] + "_NUMBER_" + str(str(exp_log))+"]"
+    
+    if not as_vector:
+        return special_tokens
+    else:
+        return [special_tokens[item] for item in special_tokens]
 
 def getFileFromLink(link, destination_path):
     try:
@@ -110,7 +121,7 @@ def apply_ocr_and_html(info):
             split_type = fileDoc['split_type']
             detect_lang = fileDoc['detect_lang']
             page_start = fileDoc['page_start'] 
-            page_end = fileDoc['page_end']
+            page_end = fileDoc['page_end'] + 1
             #lang = fileDoc['lang'] 
             total_pages = 0
             file_name_dict = pdf_file_path + "__" +  str(page_start)  
@@ -482,7 +493,7 @@ def remote_tokenize_text(info):
     consolidated_results = {}
     for i_sample, sample in enumerate(info['all_data']['all_words']): 
         label_sample = info['all_data']['all_labels'][i_sample]
-        results =  tokenize_text(info['tokenizer'], sample, label_sample, info['sequence_strategy'], info['max_sequence_length'], info['trim_begining'], info['labels2idx'])
+        results =  tokenize_text(info['tokenizer'], sample, label_sample, info['sequence_strategy'], info['max_sequence_length'], info['trim_type'], info['labels2idx'], info['clean_text_list'])
         if len(consolidated_results)==0:
             consolidated_results = results
             consolidated_results['all_metadata'] = [info['all_data']['all_metadata'][i_sample]]
@@ -498,8 +509,12 @@ def remote_tokenize_text(info):
     return consolidated_results
 
 
-def tokenize_text(tokenizer, sample, label, sequence_strategy, max_sequence_length, trim_begining, labels2idx):
+def tokenize_text(tokenizer, sample, label, sequence_strategy, max_sequence_length, trim_type, labels2idx, clean_text_list=None):
     featured_data = {'labels_ids':[],'text':[],'words':[],'input_ids':[],'token_type_ids':[],'attention_mask':[], 'encoded':[]}
+    if clean_text_list is not None:
+        for text_to_remove in clean_text_list:
+            sample = sample.replace(text_to_remove,' ')
+
     sample_tokenized =  tokenizer.tokenize(sample) 
     enconded_sample = tokenizer(sample).data
     if label is None:
@@ -508,12 +523,16 @@ def tokenize_text(tokenizer, sample, label, sequence_strategy, max_sequence_leng
         featured_data['labels_ids'].append(labels2idx[label])
     if len(sample_tokenized) - 2 > max_sequence_length:                
         if sequence_strategy == 'truncate_max_seq': #Truncate dataset
-            if trim_begining:
+            if trim_type =='random':
+                start = random.randint(0,len(enconded_sample['input_ids'])-max_sequence_length-1)
+                end = start + max_sequence_length  
+            elif trim_type =='start':
                 start = max_sequence_length-1
                 end = -1
             else:
                 start = 1
                 end = max_sequence_length-1
+        
             featured_data['text'].append(sample)
             featured_data['words'].append([tokenizer.cls_token] + sample_tokenized[start:end] +  [tokenizer.sep_token])
             featured_data['input_ids'].append(tokenizer.cls_token_id + enconded_sample['input_ids'][start:end] + tokenizer.sep_token_id)
@@ -710,6 +729,7 @@ def cleanSentences(list_sentences):
     return list_sentences
 
 def correctOCRReading(html_content, ocr_text_lines): 
+    from Levenshtein import distance as lev
     max_lev_ratio = 0.1
 
     list_words_html = [word.replace(u'\xa0', u' ') for line in html_content.text.split('\n') if len(line.split())>0 for word in line.split(' ') if len(word.strip())>0]
@@ -1005,6 +1025,172 @@ def getProportionNumbers(text):
     if number_words > 0:
         return len(results)/number_words
     return 0
+
+def removeEMails(text, tagReplace=''):
+    emailRegex = r"([a-z]*[_-]?[a-z]+@[a-z]+.?[a-z]{0,3}.?[a-z]{2})"
+    text = re.sub(emailRegex, tagReplace, text)
+    return text
+
+def removeNoisyCharacters(text, tagReplace=''):
+    same_conseqRegex = r"(?:[^\s,.;°]*([^\s0-9w])\1{2,}[^\s,.;]*)" #more than three consecutives characters different than numbers and spaces
+    text = re.sub(same_conseqRegex, tagReplace, text) 
+    same_conseqRegex2 = r"([-_/.«»]\s?){3,}" #consecutive characters with blank space in the middle
+    text = re.sub(same_conseqRegex2, tagReplace, text)
+    noisyRegex = r"[\“\”\‘'|—_\(\)«»:;-]"
+    text = re.sub(noisyRegex, tagReplace, text)
+    return text 
+
+def removeRedundantTags(text, tagSearch): 
+    tag_regex = r"(\[+" + tagSearch[1:-1] + r"\]+\s?){2,}"
+    text = re.sub(tag_regex, tagSearch, text) 
+    return text
+
+def removeApostropheDash(text, tagReplace=' '):
+    noisyRegex = r"['’`-]"
+    text = re.sub(noisyRegex, tagReplace, text)
+    return text
+
+def splitWithCharacters(text, tagReplace='\n', keep_numbers=False):
+    if keep_numbers:
+        noisyRegex = r"([;:}{!?#$\(\)\{\}\"&\*\+@\^|=~-])+" #Remove special characters except dot and colon
+        text = re.sub(noisyRegex, tagReplace, text)      
+        noisyRegex = r"[\.,]+(?=[^0-9]|$)"       #remove dot and colon if not followed by number
+        text = re.sub(noisyRegex, tagReplace, text)      
+    else:
+        noisyRegex = r"([\.,]+[\s](?!\d)(?!,)|([;:}{!?#$\(\)\{\}\"&\*\+@\^|=~-]))+" 
+        text = re.sub(noisyRegex, tagReplace, text) 
+    return text
+
+def removeMultipleBlankSpaces(text, tagReplace=' '):
+    noisyRegex = r"(\s){2,}"
+    text = re.sub(noisyRegex, tagReplace, text) 
+    return text
+
+def removeEnumerators(text, tagReplace =''):
+    enumeratorRegex = r"(?:\s{0,3})(?:i?[xv]?[a-kxv]{1,3})[.)]\s"
+    text = re.sub(enumeratorRegex, tagReplace, text)
+    return text
+
+def removeNumberInText(text, tag_replace=None, normalization_value = None):
+    special_tokens = get_special_tokens()
+    if tag_replace is None: 
+        tagReplace = special_tokens["number"] 
+
+    if normalization_value is None or len(normalization_value) ==0 or normalization_value.strip()=="0": normalization_value = "1"
+    newText = " " + text + " "
+    nRegex1_percentage = r" (\d?[.,]?\d*\s?\%\s)"  #number that ends with %
+    nRegex2_telephone = r"(\(\+\d{2,4}\)[\s\d]{6,14})\d\s|\+[\s\d]{6,14}\d" # numbers with international code
+    nRegex3_codification = r"\b[a-zA-Z]{1,3}\d{2,100}|\d{2,100}[a-zA-Z]{1,3}|[a-zA-Z]{1,3}\d{2,100}[a-zA-Z]{1,3}\b" #numbers which start and/or ends with chars (3)
+    nRegex4_rawnumber = r"(-?\s?\b\d{0,3}[.,]?\d{1,3}[.,]\d{1,2}(?!\%))\b" #numbers with decimals
+    nRegex5_rawnumber = r"(-?\s?\d{0,3}[.,'\s]?\d{1,3}[.,\s]\d{3}(?!\%)\s)" #numbers more than 1K with no decimals
+    #old: "([,.;]?\(?\+?[0-9]{0,1}\)?\s?[0-9]?[0.,']?[0-9]+[.,]?[0-9]{0,3}[,.;]?)" 
+    tag_perc = special_tokens['percentage'] 
+    tag_phone = special_tokens['phone'] 
+    tag_code = special_tokens['code'] 
+    newText = replaceCoincidences(newText, nRegex1_percentage, tag_perc)
+    newText = replaceCoincidences(newText, nRegex2_telephone, tag_phone)
+    newText = replaceCoincidences(newText, nRegex3_codification, tag_code)
+    #custom numerical replacement
+
+    coincidences = re.findall(nRegex4_rawnumber, newText.lower())
+    coincidences2 = re.findall(nRegex5_rawnumber, newText.lower())
+    coincidences.extend(coincidences2)
+    if len(coincidences) > 0:
+        coincidences = {c:0 for c in coincidences if len(c) >0 }
+        for coincidence in coincidences:
+            try: 
+                decimal = coincidence.strip()[-3:] + ".,"
+                if decimal.index(".") == len(decimal)-2 and decimal.index(",") == len(decimal)-1: #there is no decimal point or comma
+                    decimal = 0
+                    number_base = float(coincidence.replace(",","").replace(".","").replace("'",""))
+                else:
+                    index_removal = min(decimal.index("."),decimal.index(","))
+                    decimal = decimal[index_removal:].replace(',','').replace('.','')
+                    restnumber = coincidence.strip()[:-len(decimal)-1]
+                    number_base = float(restnumber.replace(".","").replace(",","").replace("'","")) + int(decimal)/10**len(decimal) 
+                if number_base < 10 and number_base>=0:
+                    tagReplace =  tagReplace
+
+                if normalization_value is not None:
+                    if normalization_value is not None:
+                        norm_value = math.log10(abs(number_base/float(normalization_value.strip())))
+                    else:
+                        norm_value = math.log10(abs(number_base))
+                    added_token = ""
+                    if number_base >0:
+                        added_token = special_tokens['positive']  
+                    else:
+                        added_token = special_tokens['negative']
+
+                    if norm_value > 0:
+                        tagReplace = added_token + ' ' + special_tokens["big_number"+ str(round(norm_value))]
+                    elif norm_value < 0:
+                        tagReplace = added_token + ' ' + special_tokens["small_number"+ str(abs(round(norm_value)))]                            
+            except Exception as ex: 
+                pass
+
+            newText = newText.replace(coincidence.strip(), ' ' + tagReplace + ' ').strip()
+    
+    return newText
+
+def replaceCoincidences(text, regex, tagReplace, min_size=0):
+    newText = text
+    coincidences = re.findall(regex, text)
+    if len(coincidences) > 0:
+        if type(coincidences[0])==str:
+            coincidences = {c.strip():0 for c in coincidences if len(c)  >min_size }
+        else:   
+            coincidences = {t.strip():0 for c in coincidences for t in c if len(t) > min_size}
+
+        for coincidence in coincidences: 
+            newText = newText.replace(coincidence.strip(), tagReplace).strip()
+    
+    return newText
+
+def removeDatesInText(text, tagReplace = ''):
+    special_tokens = get_special_tokens()
+    if tagReplace is None: tagReplace = special_tokens["date"] 
+
+    patternShortDates = "(\d{1,2}\s?[-./]\s?\d{1,2}\s?[-./]\s?\d{2,4})"
+    patternYear4Digits = "(\s[,.;]?[0-3]?[0-9][-./|\s]\s*(?:[a-zÀ-Ÿ']*([0-3]?[1-9])?){1}[-./|\s]\s*[12][089][0-9]{2}[,.;]?\s)"
+    patternYear2Digits = "(\s[,.;]?[0-3]?[0-9][-./|\s]\s*(?:[a-zÀ-Ÿ']*([0-3]?[1-9])?){1}[-./|\s]\s*[0-9]{1,2}[,.;]?\s)"
+    newText =  ' ' + text + ' '
+    replaceCoincidences(newText, patternShortDates, tagReplace, min_size=5)
+    newText = replaceCoincidences(newText, patternYear4Digits, tagReplace, min_size=5)
+    newText = replaceCoincidences(newText, patternYear2Digits, tagReplace, min_size=5)
+
+    return newText
+
+def cleanRecord(original_text, remove_numbers_type=False, normalize=False, normalization_value=None, lower_case = True): 
+    if lower_case:
+        original_text = original_text.lower()
+
+    cleaned_text_lines = ''
+    text_page = removeEMails(original_text, tagReplace= "<tempo>")
+    text_page = removeMultipleBlankSpaces(text_page) 
+
+    text_lines = text_page.split('\n') 
+    for i_line, n_text_line in enumerate(text_lines):
+        if len(n_text_line.split(' ')) > 3 and len(n_text_line)>5:
+            n_text_line = removeDatesInText(n_text_line, tagReplace= None)
+            n_text_line = removeApostropheDash(n_text_line, tagReplace= " ")
+            n_text_line = removeEnumerators(n_text_line, tagReplace= " ")
+            n_text_line = removeNoisyCharacters(n_text_line, tagReplace= " ")
+            if normalize or (remove_numbers_type is not None):
+                n_text_line = removeNumberInText(n_text_line, normalization_value = normalization_value) 
+            n_text_line = splitWithCharacters(n_text_line, tagReplace= "<tempo>", keep_numbers= remove_numbers_type is not None).strip()
+
+            n_text_line_list = n_text_line.split('<tempo>')
+            if len(n_text_line_list)>1:
+                n_text_line_list = [item.strip() for item in n_text_line_list if len(item.strip())>0] 
+                cleaned_text_lines += ' '.join(n_text_line_list) + "\n"
+            else:
+                cleaned_text_lines += n_text_line  + "\n"
+    
+    if len(cleaned_text_lines) == 0:
+        cleaned_text_lines = original_text + "\n"
+
+    return cleaned_text_lines[:-1]
 
 class FDExTGenerator():
     
@@ -1332,13 +1518,16 @@ class FDExTGenerator():
         self.lang = lang  
 
         start_time = time.time()
+        file_path = file_path.strip()
     
         error_list = []
+        print('File_path:', file_path, 'exists', os.path.exists(file_path)) 
         
         if os.path.exists(file_path):
             document_path =  file_path
             is_downloaded = True
             is_link = False
+            print('Document already downloaded:', file_path)
         else:
             is_link = True
             destination_dir = os.path.join(self.output_dir,"temp")  
@@ -1687,7 +1876,7 @@ class Object(object):
     
 class FDExt(Dataset):
 
-    def __init__(self, data_dir, output_dir, action=None, total_records=None, dataset_name=None): 
+    def __init__(self, data_dir=None, output_dir=None, action=None, total_records=None, dataset_name=None): 
         self.train = Object()
         self.train.text = []
         self.train.all_input_ids = []
@@ -1699,7 +1888,6 @@ class FDExt(Dataset):
         self.train.weights = {}
         self.train.weight_strategy = None
         self.is_train = True if action is not None and 'train' in action else False  
-        self.special_tokens = self.get_special_tokens()
         self.output_dir = output_dir
         self.data_dir = data_dir
         self.total_records = total_records
@@ -1718,18 +1906,6 @@ class FDExt(Dataset):
             if not os.path.exists(self.output_dir):
                 os.mkdir(self.output_dir)
  
-    def get_special_tokens(self, as_vector = False):
-        special_tokens = {'number': "[NUMBER]", 'date': "[DATE]", 'phone': "[PHONE]",'percentage':"[PERC]",'code':"[CODE]", 'positive': "[POSITIVE]", 'negative': "[NEGATIVE]","small":"[SMALL]","big":"[BIG]"}
-        sizes_log = {'small':'SMALL','big':'BIG'}
-        for exp_log in range(1, 10):
-            for size_log in sizes_log:
-                special_tokens[size_log + "_number" + str(exp_log)] ="["+ sizes_log[size_log] + "_NUMBER_" + str(str(exp_log))+"]"
-        
-        if not as_vector:
-            return special_tokens
-        else:
-            return [special_tokens[item] for item in special_tokens]
-
 
     def loadDataset(self, tasks_= 'default', filter_last_doc=None, filter_type_doc=None, filter_industry_cia=None , filter_lang=None, load_level = 'Default', perc_data = 1, additional_filters = None, labels_path=None, data_sel_position='first', max_number_files=None):
         '''
@@ -1740,7 +1916,7 @@ class FDExt(Dataset):
         - cia_ind: Only documents that belongs to the specified value (industry)
         - additional_filters: Other columns as filters under a dictionary structure
         - perc_data: Percentaje of the dataset to load
-        - data_sel_position: If the data is going to be taken from the begining or the end of the dataset        
+        - data_sel_position: If the data is going to be taken from the begining or the end of the dataset.       
         '''
         
         if self.load_dataset_from_file(): 
@@ -1770,74 +1946,66 @@ class FDExt(Dataset):
         base_files = {}        
         #Loading set of files into independent lists
         current_number_files = 0
-        for file in os.listdir(self.data_dir):
-                oFile = Path(file) 
-                file_composition = oFile.stem.split("_")
-                sFileName = os.path.join(self.data_dir, oFile.name)
-                if 'text_' == oFile.name[:5] and  (oFile.suffix == '.txt' or oFile.suffix == ".json"):
-                    print(oFile.stem)
-                    '''
-                    if len(file_composition)>=3 and file_composition[2]=="bbox" and not (load_level=='page' or 'text_min' in load_level):
-                        if 'bbox' in tasks_ :
-                            if data.get('bbox') is None:    
-                                data['bbox'] = read_data(sFileName)
-                            else:
-                                temp_text = read_data(sFileName) 
-                                data['bbox'].extend(temp_text) 
-                            print('>>>bbox')
-                    el
-                    '''
-                    if len(file_composition)>=3 and file_composition[2]=="format" and not (load_level=='page' or 'text_min' in load_level):
-                        if 'format' in tasks_:  
-                            if data.get('format') is None:    
-                                data['format'] = read_data(sFileName)
-                            else:
-                                temp_text = read_data(sFileName) 
-                                data['format'].extend(temp_text)  
-                            print('>>>>format')                                
-                    elif 'page' in oFile.stem:  
-                        if  file_composition[3] =='info' and (len(file_composition)==4 or (len(file_composition)==5 and file_composition[4][:3]=="bth")):
-                            if  data.get('page_info') is None:
-                                data['page_info'] = read_data(sFileName)
-                            else:
-                                 data['page_info'].extend(read_data(sFileName))
-                            print('>>>page_info') 
+        for file in exploreDirectory(self.data_dir, suffixes_list=['.txt','.json']):
+            oFile = Path(file) 
+            file_composition = oFile.stem.split("_")
+            file_composition = [part for part in file_composition if part[:3]!='bth']  
+            sFileName = os.path.join(self.data_dir, oFile.name)
+            if 'text_' == oFile.name[:5] and  (oFile.suffix == '.txt' or oFile.suffix == ".json"):
+                print(oFile.stem)
+                if len(file_composition)>=3 and file_composition[2]=="format" and not (load_level=='page' or 'text_min' in load_level):
+                    if 'format' in tasks_:  
+                        if data.get('format') is None:    
+                            data['format'] = read_data(sFileName)
                         else:
-                            base_files[oFile.stem] = 'page_info'
-                            data[oFile.stem] = read_data(sFileName)
-                            print('>>>' + oFile.stem)
+                            temp_text = read_data(sFileName) 
+                            data['format'].extend(temp_text)  
+                        print('>>>>format')                                
+                elif 'page' in file_composition:
+                    if  (file_composition[-2] =='page' and file_composition[-1] =='info'):# and (len(file_composition)==4 or (len(file_composition)==5 and file_composition[4][:3]=="bth")):
+                        if  data.get('page_info') is None:
+                            data['page_info'] = read_data(sFileName)
+                        else:
+                                data['page_info'].extend(read_data(sFileName))
+                        print('>>>page_info') 
+                    else:
+                        base_files[oFile.stem] = 'page_info'
+                        data[oFile.stem] = read_data(sFileName)
+                        print('>>>' + oFile.stem)
 
-                    elif 'doc' in oFile.stem and not (load_level=='page'):  
-                        if  '_doc'== oFile.stem[-4:]:
-                            data['doc_info'] = read_data(sFileName)
-                            print('>>>doc_info') 
-                        else:
-                            base_files[oFile.stem] = 'doc_info'
-                            data[oFile.stem] = read_data(sFileName)
-                            print('>>>' + oFile.stem)
-                    elif 'cia' in oFile.stem and not (load_level=='page'):
-                        if  '_cia'== oFile.stem[-4:]:
-                            data['cia_info'] = read_data(sFileName)
-                            print('>>>cia_info') 
-                        else:
-                            base_files[oFile.stem] = 'cia_info'
-                            data[oFile.stem] = read_data(sFileName)
-                            print('>>>' + oFile.stem)
-                    elif 'text_' in oFile.stem[:5] and load_level !='page'  and (len(oFile.stem.split("_"))==2 or len(oFile.stem.split("_"))==3 )and 'doc' not in oFile.stem and 'cia' not in oFile.stem and 'page' not in oFile.stem: 
-                        current_number_files += 1
-                        if max_number_files is None or current_number_files < max_number_files:
+                elif 'doc' in  file_composition and not (load_level=='page'):  
+                    if  '_doc'== oFile.stem[-4:]:
+                        data['doc_info'] = read_data(sFileName)
+                        print('>>>doc_info') 
+                    else:
+                        base_files[oFile.stem] = 'doc_info'
+                        data[oFile.stem] = read_data(sFileName)
+                        print('>>>' + oFile.stem)
+                elif 'cia' in file_composition and not (load_level=='page'):
+                    if  '_cia'== oFile.stem[-4:]:
+                        data['cia_info'] = read_data(sFileName)
+                        print('>>>cia_info') 
+                    else:
+                        base_files[oFile.stem] = 'cia_info'
+                        data[oFile.stem] = read_data(sFileName)
+                        print('>>>' + oFile.stem)
+                elif 'text_' in oFile.stem[:5] and load_level !='page'  and \
+                ('doc' not in file_composition and 'cia' not in file_composition and 'page' not in file_composition):
+                #(len(oFile.stem.split("_"))==2 or len(oFile.stem.split("_"))==3 ) and \ 
+                    if max_number_files is None or current_number_files < max_number_files:
+                        temp_text = read_data(sFileName)
+                        if len(file_composition) ==2 or (len(file_composition)>2 and  '_'.join(file_composition[2:]) ==temp_text[0]['file_name']):
+                            current_number_files += 1                            
                             if data.get('text') is None:    
-                                data['text']  = read_data(sFileName)
-                            else:
-                                temp_text = read_data(sFileName) 
-                                data['text'].extend(temp_text) 
-                            
+                                data['text'] = temp_text
+                            else: 
+                                data['text'].extend(temp_text)                     
                             print('>>>>text')  
                         else:
                             print('Ignored') 
-                        
-                            
-                        
+                    else:
+                        print('Ignored') 
+                    
         #get name of files which are extra to the base files
         base_files_root = {base_files[item]:0 for item in base_files}
         extra_files = [item for item in list(data.keys()) if item not in ['text','cia_info','page_info','doc_info']]
@@ -1851,7 +2019,8 @@ class FDExt(Dataset):
             if type(data[extra_file][0]) == dict:
                 is_page = False if ('doc' in extra_file or 'cia' in extra_file) else True
                 dict_temp = {}
-                for record_line_tmp in len(data[extra_file]): 
+                empty_record = {item:None for item in data[extra_file][0]} 
+                for record_line_tmp in data[extra_file]: 
                     if not is_page:
                         dict_temp[record_line_tmp[column]] = record_line_tmp
                     else:
@@ -1871,20 +2040,21 @@ class FDExt(Dataset):
                 dict_temp = {}
                 for record_line_tmp in range(1,len(data[extra_file])): 
                     data_line_temp = data[extra_file][record_line_tmp][:-1].split('\t')
-                    data_item = {headers_items[i]:data_line_temp[i] for i in range(len(headers_items)) if i > i_start}
+                    data_item = {headers_items[i]:data_line_temp[i] for i in range(len(data_line_temp)) if i > i_start}
                     
                     if not is_page:
                         dict_temp[str(data_line_temp[0])] = data_item #'\t'.join(data_line_temp[1:])
                     else:
-                        dict_temp[str(data_line_temp[0]) + "-" + str(data_line_temp[1])] = data_item #'\t'.join(data_line_temp[2:])
-                        doc_dict[str(data_line_temp[0])] = 1
+                        dict_temp[str(data_line_temp[0]).strip() + "-" +str(data_line_temp[1]).strip()] = data_item #'\t'.join(data_line_temp[2:])
+                        doc_dict[str(data_line_temp[0]).strip()] = 1
                 
             #integrating extra information into a base list
-            if data.get(base_files[extra_file]) is None:
-                data[base_files[extra_file]] = copy.deepcopy(data[extra_file])
+            collection_name = base_files[extra_file]
+            if data.get(collection_name) is None:
+                data[collection_name] = copy.deepcopy(data[extra_file])
             else:
-                if type(data[base_files[extra_file]][0]) == dict:
-                    for i_record,record_line in enumerate(data[base_files[extra_file]]):
+                if type(data[collection_name][0]) == dict:
+                    for i_record, record_line in enumerate(data[collection_name]):
                         record_key = record_line[column]
                         if is_page:
                             record_Key2 = record_line['page_number']
@@ -1896,16 +2066,16 @@ class FDExt(Dataset):
                             current_record = dict_temp.get(str(record_key)) 
 
                         if current_record is not None: 
-                            data[base_files[extra_file]][i_record].update(current_record) 
+                            data[collection_name][i_record].update(current_record) 
                         else:
-                            data[base_files[extra_file]][i_record].update(empty_record)
+                            data[collection_name][i_record].update(empty_record)
                 else:
-                    for i_record,record_line in enumerate(data[base_files[extra_file]]):
+                    for i_record,record_line in enumerate(data[collection_name]):
                         record_id = record_line.split('\t')[0]
                         if is_page:
                             record_id2 = record_line.split('\t')[1]
                         if i_record==0:
-                            data[base_files[extra_file]][i_record] = record_line[:-1]+'\t'+file_header_str+'\n'
+                            data[collection_name][i_record] = record_line[:-1]+'\t'+file_header_str+'\n'
                         else:
                             if is_page:
                                 if doc_dict.get(str(record_id)) is not None:
@@ -1917,10 +2087,10 @@ class FDExt(Dataset):
 
                             if current_record is not None:
                                 current_record_str = '\t'.join([current_record[item] for item in current_record])
-                                data[base_files[extra_file]][i_record] = record_line[:-1]+'\t'+current_record_str+'\n'
+                                data[collection_name][i_record] = record_line[:-1]+'\t'+current_record_str+'\n'
                             else:
                                 empty_record_str = '\t'.join(['' for item in empty_record])
-                                data[base_files[extra_file]][i_record] = record_line[:-1]+'\t'+ empty_record_str+'\n'
+                                data[collection_name][i_record] = record_line[:-1]+'\t'+ empty_record_str+'\n'
             
             data[extra_file] = None
 
@@ -1935,6 +2105,7 @@ class FDExt(Dataset):
             print('>>>>labels', len(self.loaded_labels), 'from ' , labels_path) 
         else:
             self.loaded_labels = None
+        
         #Reducing the dataset
         if perc_data < 1: 
             initial_rows = len(data['text'])
@@ -1963,7 +2134,8 @@ class FDExt(Dataset):
                     if len(last_row) > 0:
                         document_name = last_row[0]
                         data['text'] = [item for item in  data['text'] if item[:len(document_name)]!=document_name]
-            
+                        new_rows = len(data['text'] )
+                        perc_data = int(new_rows/initial_rows*100)/100
             print('Reduced from : ', initial_rows, 'rows, to: ' , new_rows, 'rows', "~",perc_data*100, "% of data")
 
         #Loading row info    
@@ -1976,7 +2148,9 @@ class FDExt(Dataset):
         self.number_documents = len({item['file_name']:0 for item in dataset})
         print('Initial reduced dataset with ', self.number_documents, ' documents', 'and', len(dataset), "records")
         self.page_info = None
-
+        if len(dataset) == 0:
+            raise Exception('No data to work with')
+        
         if dataset[0].get('page_number') is not None:
             number_pages = len({item['file_name']+"-"+str(item['page_number']):0 for item in dataset})
             print('Initial dataset with ', number_pages, 'pages')
@@ -2035,20 +2209,25 @@ class FDExt(Dataset):
         print('Previous filtering', Counter([item.get('risk_desc') for item in dataset if item.get('risk_desc') is not None]))
         print('Number companies', len({item.get('company_id') for item in dataset}))
         print('Number documents', len({item.get('file_name') for item in dataset}))
+        
+        self.dataset_last_documents = {}
         if data.get('doc_info') is not None or data.get('page_info') is not None: 
             self.dataset = dataset
-            dataset = self.filter_dataset(doc_filters)      
-            self.dataset = dataset
+            if len(doc_filters)>0:
+                dataset = self.filter_dataset(doc_filters)      
+                self.dataset = dataset
             data['cia_info'] = None
             data['doc_info'] = None
-        
+        else:
+            self.dataset = dataset
+
         if 'lang' in load_level or load_level=='Default':
             if  'text_min' in load_level:
                 self.train.text = []
-                self.train.text_lang = [{'file_name':item['file_name'], 'page_number':item['page_number'], 'line_number': item['line_number'], 'language': item['language'],'text':item['text']} for item in dataset]        
+                self.train.text_lang = [{'file_name':item['file_name'], 'page_number':item['page_number'], 'line_number': item['line_number'], 'language': item.get('language'),'text':item.get('text')} for item in dataset]        
                 del dataset
             else:
-                self.train.text_lang = [{'file_name':item['file_name'], 'page_number':item['page_number'], 'line_number': item['line_number'], 'language': item['language']} for item in dataset]
+                self.train.text_lang = [{'file_name':item['file_name'], 'page_number':item['page_number'], 'line_number': item['line_number'], 'language': item.get('language')} for item in dataset]
         else:
             self.train.text_lang = None
         
@@ -2066,199 +2245,122 @@ class FDExt(Dataset):
 
         return True
 
-    def removeEMails(self, text, tagReplace=''):
-        emailRegex = r"([a-z]*[_-]?[a-z]+@[a-z]+.?[a-z]{0,3}.?[a-z]{2})"
-        text = re.sub(emailRegex, tagReplace, text)
-        return text
-
-    def removeNoisyCharacters(self, text, tagReplace=''):
-        same_conseqRegex = r"(?:[^\s,.;°]*([^\s0-9w])\1{2,}[^\s,.;]*)" #more than three consecutives characters different than numbers and spaces
-        text = re.sub(same_conseqRegex, tagReplace, text) 
-        same_conseqRegex2 = r"([-_/.«»]\s?){3,}" #consecutive characters with blank space in the middle
-        text = re.sub(same_conseqRegex2, tagReplace, text)
-        noisyRegex = r"[\“\”\‘'|—_\(\)«»:;-]"
-        text = re.sub(noisyRegex, tagReplace, text)
-        return text 
-
-    def removeRedundantTags(self, text, tagSearch): 
-        tag_regex = r"(\[+" + tagSearch[1:-1] + r"\]+\s?){2,}"
-        text = re.sub(tag_regex, tagSearch, text) 
-        return text
-
-    def removeApostropheDash(self, text, tagReplace=' '):
-        noisyRegex = r"['’`-]"
-        text = re.sub(noisyRegex, tagReplace, text)
-        return text
-
-    def splitWithCharacters(self, text, tagReplace='\n', keep_numbers=False):
-        if keep_numbers:
-            noisyRegex = r"([;:}{!?#$\(\)\{\}\"&\*\+@\^|=~-])+" #Remove special characters except dot and colon
-            text = re.sub(noisyRegex, tagReplace, text)      
-            noisyRegex = r"[\.,]+(?=[^0-9]|$)"       #remove dot and colon if not followed by number
-            text = re.sub(noisyRegex, tagReplace, text)      
-        else:
-            noisyRegex = r"([\.,]+[\s](?!\d)(?!,)|([;:}{!?#$\(\)\{\}\"&\*\+@\^|=~-]))+" 
-            text = re.sub(noisyRegex, tagReplace, text) 
-        return text
-
-    def removeMultipleBlankSpaces(self, text, tagReplace=' '):
-        noisyRegex = r"(\s){2,}"
-        text = re.sub(noisyRegex, tagReplace, text) 
-        return text
-
-    def removeEnumerators(self, text, tagReplace =''):
-        enumeratorRegex = r"(?:\s{0,3})(?:i?[xv]?[a-kxv]{1,3})[.)]\s"
-        text = re.sub(enumeratorRegex, tagReplace, text)
-        return text
-
-    def removeNumberInText(self, text, tag_replace=None, normalization_value = None):
-        if tag_replace is None: tagReplace = self.special_tokens["number"]
-        if normalization_value is None or len(normalization_value) ==0 or normalization_value.strip()=="0": normalization_value = 1
-        newText = " " + text + " "
-        nRegex1_percentage = r" (\d?[.,]?\d*\s?\%\s)"  #number that ends with %
-        nRegex2_telephone = r"(\(\+\d{2,4}\)[\s\d]{6,14})\d\s|\+[\s\d]{6,14}\d" # numbers with international code
-        nRegex3_codification = r"\b[a-zA-Z]{1,3}\d{2,100}|\d{2,100}[a-zA-Z]{1,3}|[a-zA-Z]{1,3}\d{2,100}[a-zA-Z]{1,3}\b" #numbers which start and/or ends with chars (3)
-        nRegex4_rawnumber = r"(-?\s?\b\d{0,3}[.,]?\d{1,3}[.,]\d{1,2}(?!\%))\b" #numbers with decimals
-        nRegex5_rawnumber = r"(-?\s?\d{0,3}[.,'\s]?\d{1,3}[.,\s]\d{3}(?!\%)\s)" #numbers more than 1K with no decimals
-        #old: "([,.;]?\(?\+?[0-9]{0,1}\)?\s?[0-9]?[0.,']?[0-9]+[.,]?[0-9]{0,3}[,.;]?)" 
-        newText = self.replaceCoincidences(newText, nRegex1_percentage, self.special_tokens['percentage'])
-        newText = self.replaceCoincidences(newText, nRegex2_telephone, self.special_tokens['phone'])
-        newText = self.replaceCoincidences(newText, nRegex3_codification, self.special_tokens['code'])
-        #custom numerical replacement
     
-        coincidences = re.findall(nRegex4_rawnumber, newText.lower())
-        coincidences2 = re.findall(nRegex5_rawnumber, newText.lower())
-        coincidences.extend(coincidences2)
-        if len(coincidences) > 0:
-            coincidences = {c:0 for c in coincidences if len(c) >0 }
-            for coincidence in coincidences:
-                try:
-                    decimal = coincidence.strip()[-3:] + ".,"
-                    index_removal = min(decimal.index("."),decimal.index(","))
-                    decimal = decimal[:index_removal]
-                    restnumber = coincidence.strip()[:-3]
-                    restnumber = restnumber.replace(".","").replace(",","").replace("'","") + decimal
-                    number_base = float(restnumber.strip())
-                    if normalization_value is not None:
-                        norm_value = math.log10(abs(number_base/float(normalization_value.strip())))
-                        added_token = ""
-                        if number_base >0:
-                            added_token = self.special_tokens['positive']
-                        else:
-                            added_token = self.special_tokens['negative']
-
-                        if norm_value > 0:
-                            tagReplace = added_token + ' ' + self.special_tokens["big_number"+ str(round(norm_value))]
-                        elif norm_value < 0:
-                            tagReplace = added_token + ' ' + self.special_tokens["small_number"+ str(abs(round(norm_value)))]                            
-                except:
-                    pass
-
-                newText = newText.replace(coincidence.strip(), ' ' + tagReplace + ' ').strip()
-        
-        return newText
-
-    def replaceCoincidences(self, text, regex, tagReplace, min_size=0):
-        newText = text
-        coincidences = re.findall(regex, text)
-        if len(coincidences) > 0:
-            if type(coincidences[0])==str:
-                coincidences = {c.strip():0 for c in coincidences if len(c)  >min_size }
-            else:   
-                coincidences = {t.strip():0 for c in coincidences for t in c if len(t) > min_size}
-
-            for coincidence in coincidences: 
-                newText = newText.replace(coincidence.strip(), tagReplace).strip()
-        
-        return newText
-
-    def removeDatesInText(self, text, tagReplace = ''):
-        if tagReplace is None: tagReplace = self.special_tokens["date"]
-
-        patternShortDates = "(\d{1,2}\s?[-./]\s?\d{1,2}\s?[-./]\s?\d{2,4})"
-        patternYear4Digits = "(\s[,.;]?[0-3]?[0-9][-./|\s]\s*(?:[a-zÀ-Ÿ']*([0-3]?[1-9])?){1}[-./|\s]\s*[12][089][0-9]{2}[,.;]?\s)"
-        patternYear2Digits = "(\s[,.;]?[0-3]?[0-9][-./|\s]\s*(?:[a-zÀ-Ÿ']*([0-3]?[1-9])?){1}[-./|\s]\s*[0-9]{1,2}[,.;]?\s)"
-        newText =  ' ' + text + ' '
-        self.replaceCoincidences(newText, patternShortDates, tagReplace, min_size=5)
-        newText =self.replaceCoincidences(newText, patternYear4Digits, tagReplace, min_size=5)
-        newText =self.replaceCoincidences(newText, patternYear2Digits, tagReplace, min_size=5)
-
-        return newText
-
-    def cleanRecord(self, info_text, lower_case = True):
-        original_text = info_text['text_page']
-        remove_numbers = info_text['remove_numbers']
-        normalize = info_text['normalize']
-        normalization_value = info_text['normalization_value']
-        info_text['index'] = info_text['index'] if info_text.get('index') is not None else 0
-        if lower_case:
-            original_text = original_text.lower()
-
-        cleaned_text_lines = ''
-        text_page = self.removeEMails(original_text, tagReplace= "<tempo>")
-        text_page = self.removeMultipleBlankSpaces(text_page) 
-
-        text_lines = text_page.split('\n') 
-        for i_line, n_text_line in enumerate(text_lines):
-            if len(n_text_line.split(' ')) > 3 and len(n_text_line)>5:
-                n_text_line = self.removeDatesInText(n_text_line, tagReplace= None)
-                n_text_line = self.removeApostropheDash(n_text_line, tagReplace= " ")
-                n_text_line = self.removeEnumerators(n_text_line, tagReplace= " ")
-                n_text_line = self.removeNoisyCharacters(n_text_line, tagReplace= " ")
-                if remove_numbers or normalize:
-                    n_text_line = self.removeNumberInText(n_text_line, normalization_value = normalization_value) 
-                n_text_line = self.splitWithCharacters(n_text_line, tagReplace= "<tempo>", keep_numbers= not remove_numbers).strip()
-
-                n_text_line_list = n_text_line.split('<tempo>')
-                if len(n_text_line_list)>1:
-                    n_text_line_list = [item.strip() for item in n_text_line_list if len(item.strip())>0] 
-                    cleaned_text_lines += ' '.join(n_text_line_list) + "\n"
-                else:
-                    cleaned_text_lines += n_text_line  + "\n"
-        
-        if len(cleaned_text_lines) == 0:
-            cleaned_text_lines = original_text + "\n"
-
-        return {'text':cleaned_text_lines[:-1],'index':info_text['index']}
-    
-    def preprocessData(self, text_list, distrib_tool, normalization_list = None, remove_numbers=True): 
+    def preprocessData(self, text_list, normalization_list = None, remove_numbers_type=None): 
         if normalization_list is None: 
             normalize = False
         else:
             normalize = True
 
-        if remove_numbers and not normalize: 
+        if remove_numbers_type is not None and not normalize: 
             print('Removing numbers while cleaning')
         else:
             if not normalize:
                 print('Numbers are not removed while cleaning')
             else:
                 print('Numbers are going to be normalized')
-        
-        number_workers = 1#mp.cpu_count()
-        cleaned_list = [] #['' for item in range(len(text_list))]
+         
+        cleaned_list = [] 
 
-        for i_page in tqdm.tqdm(range(0,len(text_list), number_workers)):  #parallelization of cleaning
-            normalization_value = 1 if normalization_list is None else normalization_list[i_page]
-            info_text = {'text_page': text_list[i_page].lower(), 'remove_numbers':remove_numbers, 'normalize':normalize,'normalization_value':normalization_value, 'index':i_page}
+        for i_page in tqdm.tqdm(range(0,len(text_list))):
+            normalization_value = 1 if normalization_list is None else normalization_list[i_page] 
+            response_text = cleanRecord(text_list[i_page].lower(), remove_numbers_type=remove_numbers_type, normalize=normalize, normalization_value=normalization_value, lower_case = True)
+            cleaned_list.append(response_text)
             
-            '''
-            dataset_batch = []
-            for i, text_page in enumerate(text_list[i_page:i_page+number_workers]):
-                info_text = {'text_page': text_page.lower(), 'remove_numbers':remove_numbers, 'normalize':normalize,'normalization_value':normalization_value, 'index':i_page+i}
-                dataset_batch.append(info_text) 
-            
-            results = distribute(distrib_tool, dataset_batch, self.cleanRecord, total_workers=number_workers)
-            for result in results:
-                cleaned_list[result['index']]= result['text']
-            dataset_batch = []
-            '''
-
-            cleaned_list.append(self.cleanRecord(info_text)['text'])
-
+       
         return cleaned_list
     
-    def prepare_input_data(self, model_dir, model_type, group_level, y_label_type, labels, y_top_n, trim_begining, tokenizer, sequence_strategy, sequence_shift, max_segments_bert, max_proportion_numbers_words=0.2, filter_min_words=20, terms_filter_path=None, clean_data = None, remove_numbers = True,time_grouped_by_company=False, normalization_column=None, worker_workload=None, distibution_tool=None):
+    def prepareRecord(self, text, tokenizer): 
+        cleaned_text = self.preprocessData([text], normalization_list = None, remove_numbers_type=None)
+        results = tokenize_text(tokenizer, sample=cleaned_text[0], label=None, sequence_strategy='document_batch', max_sequence_length =512, trim_type ='end', labels2idx=None, clean_text_list=None)
+        return results
+    
+    def segment_text_sample(self, text_tokens_sample, encoded_sample, trim_type, max_sequence_length, max_segments_bert, sequence_shift, padtypes, return_tensors=False):
+        #sequence_shift = 400
+        number_segments = 0
+        overloaded_segments = {}
+
+        if trim_type=='start':
+            start_index = max(0, len(text_tokens_sample)- (max_sequence_length-2))
+        elif trim_type =='random':
+            start_index = random.randint(0, len(text_tokens_sample)- (max_sequence_length-2)-1)
+        else:
+            start_index = 0 
+            
+        start_index_over = 0
+        while True:
+            current_vector = text_tokens_sample[start_index:start_index+(max_sequence_length-2)]
+            if len(current_vector)>0 and number_segments <30: #limit to 30 iterations
+                number_segments +=1
+                if trim_type=='start' or trim_type=='random':
+                    if number_segments >= max_segments_bert and start_index_over ==0:
+                        start_index_over = start_index
+                    index_temp = max(0, start_index - sequence_shift)
+                    if index_temp == start_index: 
+                        break
+                    else:
+                        start_index = index_temp
+                else:
+                    start_index += sequence_shift-2
+            else:
+                break
+        
+        #Log Long segments
+        if number_segments > max_segments_bert:
+            if overloaded_segments.get(number_segments) is None: overloaded_segments[number_segments]=0 
+            overloaded_segments[number_segments] +=1
+
+        start_index = start_index_over
+
+        tokens_temp, input_ids_temp, token_types_temp, attention_masks_temp = [], [], [], []
+        for i_segment in range(min(number_segments, max_segments_bert)):
+            current_vector = text_tokens_sample[start_index:start_index+(max_sequence_length-2)]
+                 
+            if len(current_vector) ==0:
+                break
+            elif len(current_vector) <= (max_sequence_length-2):
+                end_i = start_index + (max_sequence_length-2)
+                tokens_temp.append([padtypes['cls_token']] + current_vector + [padtypes['sep_token']]) 
+                input_ids_temp.append([padtypes['cls_token_id']] + encoded_sample['input_ids'][1:-1][start_index:end_i] + [padtypes['sep_token_id']] )
+                token_types_temp.append([encoded_sample['token_type_ids'][0]] + encoded_sample['token_type_ids'][1:-1][start_index:end_i]+ [encoded_sample['token_type_ids'][0]] )
+                attention_masks_temp.append([encoded_sample['attention_mask'][0]] + encoded_sample['attention_mask'][1:-1][start_index:end_i]+ [encoded_sample['attention_mask'][0]] )                  
+            
+                assert len(tokens_temp[-1])==len(input_ids_temp[-1])
+                assert len(tokens_temp[-1])==len(token_types_temp[-1]) 
+                assert len(tokens_temp[-1])==len(attention_masks_temp[-1]) 
+                
+                #number_segments_current+=1
+                start_index += sequence_shift
+
+                if i_segment == (min(max_segments_bert,number_segments) - 1):
+                    total_to_pad = max_sequence_length-len(tokens_temp[-1]) #the last appended row (current one)
+                    if total_to_pad>0:
+                        tokens_temp[-1].extend([padtypes['words'] for item in range(total_to_pad)])             
+                        input_ids_temp[-1].extend([padtypes['input_ids'] for item in range(total_to_pad)])  
+                        token_types_temp[-1].extend([padtypes['token_type_ids'] for item in range(total_to_pad)])  
+                        attention_masks_temp[-1].extend([padtypes['attention_mask'] for item in range(total_to_pad)])  
+        
+        if number_segments < max_segments_bert:
+            pad_array = [padtypes['words'] for item in range(max_sequence_length)]
+            for i in range(max_segments_bert - number_segments):
+                tokens_temp.append(pad_array)
+                input_ids_temp.append( [padtypes['input_ids'] for item in range(max_sequence_length)])
+                token_types_temp.append( [padtypes['token_type_ids'] for item in range(max_sequence_length)])
+                attention_masks_temp.append( [padtypes['attention_mask'] for item in range(max_sequence_length)])
+
+        if return_tensors:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            input_ids_temp = torch.tensor(input_ids_temp, dtype=torch.long).to(device)
+            token_types_temp = torch.tensor(token_types_temp, dtype=torch.long).to(device) 
+            attention_masks_temp = torch.tensor(attention_masks_temp, dtype=torch.long).to(device)
+            
+        return tokens_temp,input_ids_temp,token_types_temp,attention_masks_temp, number_segments, overloaded_segments
+
+    def get_pad_types(self, tokenizer):
+        return  {'words':tokenizer.pad_token, 'token_type_ids':1, 'attention_mask':0, 'input_ids':tokenizer.pad_token_id, 
+                    'cls_token':tokenizer.cls_token, 'cls_token_id':tokenizer.cls_token_id, 'sep_token':tokenizer.sep_token, 'sep_token_id':tokenizer.sep_token_id}
+        
+    def prepare_input_data(self, model_dir, model_type, group_level, y_label_type, labels, y_top_n, trim_type, tokenizer, sequence_strategy, sequence_shift, max_segments_bert, max_proportion_numbers_words=0.4, filter_min_words=20, terms_filter_path=None, clean_data = None, remove_numbers = True, time_grouped_by_company=False, normalization_column=None, worker_workload=None, distibution_tool=None, clean_text_list = None, parallel_workers=None):
         '''
         group_level: page, document, paragraph, line
         y_label_type: Column name of dataset: i.e. document_type, company_name, status. If "group" is specified, then is the group name, ex. subtitle for paragraphs 
@@ -2267,10 +2369,10 @@ class FDExt(Dataset):
         '''
         
         if model_type == "SA":
-            group_level = 'document'
+            if group_level is None: group_level = 'document' 
             if y_label_type is None: y_label_type='risk_desc'
+            if max_proportion_numbers_words is None: max_proportion_numbers_words =0.5
             y_top_n = None 
-            max_proportion_numbers_words =0.5
         elif model_type == "NER":
             group_level = 'paragraph'
             y_label_type='group'
@@ -2296,19 +2398,19 @@ class FDExt(Dataset):
         if normalization_column is not None:
             additional_headers.append(normalization_column)
         
-        parallel_workers = mp.cpu_count() if distibution_tool is not None else 1
-
-        self.get_grouped_text(rows_list=self.dataset, clean_data=clean_data, remove_numbers=remove_numbers, group_level=group_level, y_label_type=y_label_type, filter_min_words=filter_min_words, additional_headers = additional_headers,parallel_workers=parallel_workers, distrib_tool=distibution_tool, workload=worker_workload)
+        if parallel_workers is None: parallel_workers = max(int(mp.cpu_count()*3/4),1) if distibution_tool is not None else 1
+        print('Distributing load into ', parallel_workers, 'workers, with a workload each one of', worker_workload, 'documents')
+        self.get_grouped_text(rows_list=self.dataset, clean_data=clean_data, remove_numbers_type=remove_numbers, group_level=group_level, y_label_type=y_label_type, filter_min_words=filter_min_words, additional_headers = additional_headers,parallel_workers=parallel_workers, distrib_tool=distibution_tool, workload=worker_workload)
         print('label',y_label_type,'min_words',filter_min_words,'group_level',group_level)
-        print('Labels', Counter([item.get('risk_desc') for item in self.dataset if item.get('risk_desc') is not None]))
-        print('Number of companies', len({item['company_id'] for item in self.dataset}))
+        print('Labels', Counter([item.get(y_label_type) for item in self.dataset if item.get(y_label_type) is not None]))
+        print('Number of companies', len({item.get('company_id') for item in self.dataset}))
 
         if clean_data or normalization_column is not None:
             if clean_data is None: print('Cleaning data')
             if normalization_column is not None: 
                 print('Normalizing numbers with column', normalization_column)
                 normalization_list = [item.get(normalization_column) for item in self.train.all_metadata]
-            self.train.all_words = self.preprocessData(self.train.all_words, distibution_tool, normalization_list = normalization_list, remove_numbers=remove_numbers)
+            self.train.all_words = self.preprocessData(self.train.all_words, normalization_list = normalization_list, remove_numbers_type=remove_numbers)
         else:
             print('Data is not going to be cleaned')
 
@@ -2319,7 +2421,6 @@ class FDExt(Dataset):
                     terms_filter_list = json.load(f)
             else:
                 print('Filter file not found on',terms_filter_path)
-
 
         if tokenizer is None: 
             tokenizer = BertTokenizer.from_pretrained("bert-base-multilingual-uncased") 
@@ -2365,7 +2466,7 @@ class FDExt(Dataset):
             is_reduced = True
         else:   
             for i_label, label in enumerate(self.train.all_labels):  
-                if labels is not None and labels_dict.get(label) is None:
+                if (labels is not None and labels_dict.get(label) is None) or (label is not None and len(label) ==0):
                     self.train.all_labels[i_label] = None 
 
         if not self.is_train:
@@ -2377,7 +2478,7 @@ class FDExt(Dataset):
             self.train.idx2labels= {i:item for i,item in  enumerate(labels_dict)}
             self.save_training_classes(model_dir, {'labels2idx':self.train.labels2idx,'idx2labels':self.train.idx2labels,'is_reduced':is_reduced})
         
-        padtypes = {'words':tokenizer.pad_token, 'token_type_ids':1, 'attention_mask':0, 'input_ids':tokenizer.pad_token_id}
+        padtypes = self.get_pad_types(tokenizer)
         #edgetokens = {'cls_ii':None, 'sep_ii':None,'cls_tt':None, 'sep_tt':None,'cls_am':None, 'sep_am':None}
 
         #featured_data={'encoded':[],'text':[],'input_ids': [], 'token_type_ids': [], 'attention_mask': [], 'words': [], 'labels':[]}
@@ -2389,7 +2490,7 @@ class FDExt(Dataset):
         companies_to_remove = {}
         for sample in self.train.all_words:
             i_row += 1
-            
+
             if terms_filter_list is not None:
                 found_term = False
                 for term_base in terms_filter_list:
@@ -2403,6 +2504,7 @@ class FDExt(Dataset):
 
             #remove text which have a significant amount of numbers
             if max_proportion_numbers_words > 0 and max_proportion_numbers_words < 1:
+                #print('Max proportion number/words', max_proportion_numbers_words)
                 proportion_numbers_words = getProportionNumbers(self.train.all_words[i_row])
                 if proportion_numbers_words > max_proportion_numbers_words:
                     self.train.all_labels[i_row] = None
@@ -2453,20 +2555,21 @@ class FDExt(Dataset):
             self.train.all_metadata = [item for item in self.train.all_metadata if item is not None] 
             self.train.text = [item for item in self.train.text if item is not None] 
             self.train.text_lang = [item for item in self.train.text_lang if item is not None] 
+            print('All metadata size:', len(self.train.all_metadata))
         else:
             print('No data was removed')
 
         if len(self.train.all_labels) != len(self.train.all_metadata):
             print('All labels size:', len(self.train.all_labels))
             print('All metadata size:', len(self.train.all_metadata))
-
+        print('Starting tokenization')
         temp_featured_data = {}
         if parallel_workers ==1: worker_workload=1
         for i_sample in tqdm.tqdm(range(0,len(self.train.all_words),parallel_workers*worker_workload)):
             if parallel_workers ==1:
                 sample = self.train.all_words[i_sample]
                 sample_label = self.train.all_labels[i_sample]
-                results = tokenize_text(tokenizer, sample, sample_label, sequence_strategy, max_sequence_length,trim_begining, self.train.labels2idx)
+                results = tokenize_text(tokenizer, sample, sample_label, sequence_strategy, max_sequence_length,trim_type, self.train.labels2idx, clean_text_list =clean_text_list)
                 if len(temp_featured_data) ==0:
                     temp_featured_data = results
                     temp_featured_data['all_metadata'] = [self.train.all_metadata[i_sample]] 
@@ -2490,7 +2593,7 @@ class FDExt(Dataset):
                         'text':self.train.text[i_start:i_end],
                         'text_lang':self.train.text_lang[i_start:i_end],
                     } 
-                    info = {'all_data':all_data,'tokenizer':tokenizer,'sequence_strategy':sequence_strategy,'max_sequence_length':max_sequence_length,'trim_begining':trim_begining,'labels2idx':self.train.labels2idx} 
+                    info = {'all_data':all_data,'tokenizer':tokenizer,'sequence_strategy':sequence_strategy,'max_sequence_length':max_sequence_length,'trim_type':trim_type,'labels2idx':self.train.labels2idx, 'clean_text_list':clean_text_list} 
                     batch_info.append(info)
 
                 results = distribute(distibution_tool, batch_info, remote_tokenize_text, total_workers=parallel_workers)
@@ -2505,13 +2608,9 @@ class FDExt(Dataset):
 
         self.train.all_labels,self.train.all_words,self.train.all_metadata,self.train.text,self.train.text_lang = [],[],[],[],[] 
 
-
         print('Finished preparing data.')
         if sequence_strategy == 'document_batch':
-            print('Starting preparing batchs by document')
-            #left_shift  = max_sequence_length - sequence_shift
-            
-            segments_list = []
+            print('Starting preparing batchs by document')    
             overloaded_segments = {} 
             tokens_per_word_list= []
             tokens_per_group = []
@@ -2519,24 +2618,49 @@ class FDExt(Dataset):
             words_per_group = []
             fertility = []
             fertility_per_group = [] 
+            companies_for_removing = {}
+            start_doc_indexes = {}
             number_segments_total = 0
+            tokens_temp, input_ids_temp, token_types_temp, attention_masks_temp,labels_temp = [], [], [], [], []
             #determine the number of segments of each document based on  max_sequence_length
-            for i_sample, sample_metadata  in  enumerate(temp_featured_data['all_metadata']):
+            for i_sample, sample_metadata  in  tqdm.tqdm(enumerate(temp_featured_data['all_metadata'])):
                 word_group = temp_featured_data['words'][i_sample] 
 
                 if time_grouped_by_company and self.dataset_last_documents.get(sample_metadata['company_id']) is None:
+                    temp_featured_data['all_labels'][i_sample] = None
                     continue
-                proportion_numbers_words = getProportionNumbers(temp_featured_data['text'][i_sample])
-                number_segments = 1 if len(word_group) < max_sequence_length else int(np.ceil(len(word_group) / sequence_shift))
+                
+                if temp_featured_data['all_labels'][i_sample] is None: #removing segments with too many numbers
+                    companies_for_removing[temp_featured_data['all_metadata'][i_sample]['company_id']] = 0#temp_featured_data['all_labels'][i_sample]
+                    temp_featured_data['text'][i_sample] = None 
+                    temp_featured_data['text_lang'][i_sample] = None
+                    temp_featured_data['words'][i_sample]  = None 
+                    temp_featured_data['all_labels'][i_sample]  = None
+                    temp_featured_data['all_metadata'][i_sample]  = None
+                    #featured_data_labels_temp.append(None)
+                    has_removed_records = True  
+                    #clean +=1
+                    continue
+
+                
+                doc_id = temp_featured_data['all_metadata'][i_sample]['document']
+                if start_doc_indexes.get(doc_id) is None: start_doc_indexes[doc_id]= len(tokens_temp)
+
+                tokens_sample,input_ids_sample,token_types_sample,attention_masks_sample, number_segments, overloaded_segments_sample = self.segment_text_sample(word_group, temp_featured_data['encoded'][i_sample] , trim_type, max_sequence_length, max_segments_bert, sequence_shift, padtypes)    
+                
                 number_segments_total += number_segments
-                if number_segments > 1 and (number_segments-1) *max_sequence_length>=len(word_group):
-                    number_segments -= 1    
-                    number_segments_total -= 1 
-                if number_segments > max_segments_bert:
-                    if overloaded_segments.get(number_segments) is None: overloaded_segments[number_segments]=0 
-                    overloaded_segments[number_segments] +=1
-                    number_segments = max_segments_bert 
-                segments_list.append(number_segments)        
+                tokens_temp.extend(tokens_sample)
+                input_ids_temp.extend(input_ids_sample)
+                token_types_temp.extend(token_types_sample)
+                attention_masks_temp.extend(attention_masks_sample) 
+
+                overloaded_segments.update(overloaded_segments_sample)
+
+                #only one label per sequence
+                labels_temp.append(temp_featured_data['labels_ids'][i_sample])
+
+                assert max_segments_bert*len(labels_temp) == len(tokens_temp)
+
                 #statistics
                 number_words = len(temp_featured_data['text'][i_sample].split(' '))
                 number_tokens = len(word_group)
@@ -2576,74 +2700,26 @@ class FDExt(Dataset):
             if len(words_per_group) > 0: print('Average words per group',sum(words_per_group)/len(words_per_group)) 
             if len(fertility_per_group) >0: print('Average fertility per group', sum(fertility_per_group)/len(fertility_per_group))
             
-            featured_data_words_temp = []
-            featured_data_labels_temp = []
-            featured_data_input_ids_temp = []
-            featured_data_token_types_temp = []
-            featured_data_attention_masks_temp = []
-            start_indexes = {}
-            clean = 0
-            companies_for_removing = {}
             
-            print('Number of labels', len( temp_featured_data['all_labels']), "metadata:", len(temp_featured_data['all_metadata']))
-            print('Segments to remove (short ones or too many numbers)', len([item for item in segments_list if item==0]))
-            print('Starting generation of input ids')
-            for i_doc in tqdm.tqdm(range(len(temp_featured_data['words']))):  
-                if segments_list[i_doc] ==0 or temp_featured_data['all_labels'][i_doc] is None: #removing short segments or segments with too many numbers
-                    companies_for_removing[temp_featured_data['all_metadata'][i_doc]['company_id']] = temp_featured_data['all_labels'][i_doc]
-                    temp_featured_data['text'][i_doc] = None 
-                    temp_featured_data['text_lang'][i_doc] = None
-                    temp_featured_data['words'][i_doc]  = None 
-                    temp_featured_data['all_labels'][i_doc]  = None
-                    temp_featured_data['all_metadata'][i_doc]  = None
-                    featured_data_labels_temp.append(None)
-                    has_removed_records = True  
-                    clean +=1
-                else:
-                    start_indexes[temp_featured_data['all_metadata'][i_doc]['document']]= len(featured_data_words_temp)
-                    word_group = temp_featured_data['words'][i_doc]
-                    #divide document's text into the pre-calculated number of segments
-                    for i_segment in range(segments_list[i_doc]):
-                        start_i = i_segment * sequence_shift
-                        end_i = i_segment * sequence_shift + max_sequence_length - 2
-                        featured_data_words_temp.append([tokenizer.cls_token] + word_group[start_i:end_i] + [tokenizer.sep_token]) 
-                        featured_data_input_ids_temp.append([tokenizer.cls_token_id] + temp_featured_data['encoded'][i_doc]['input_ids'][1:-1][start_i:end_i] + [tokenizer.sep_token_id] )
-                        featured_data_token_types_temp.append([temp_featured_data['encoded'][i_doc]['token_type_ids'][0]] + temp_featured_data['encoded'][i_doc]['token_type_ids'][1:-1][start_i:end_i]+ [temp_featured_data['encoded'][i_doc]['token_type_ids'][0]] )
-                        featured_data_attention_masks_temp.append([temp_featured_data['encoded'][i_doc]['attention_mask'][0]] + temp_featured_data['encoded'][i_doc]['attention_mask'][1:-1][start_i:end_i]+ [temp_featured_data['encoded'][i_doc]['attention_mask'][0]] )
-                        assert len(featured_data_words_temp[-1])==len(featured_data_input_ids_temp[-1])
-                        assert len(featured_data_words_temp[-1])==len(featured_data_token_types_temp[-1])
-                        assert len(featured_data_words_temp[-1])==len(featured_data_attention_masks_temp[-1])
-                    ## pad right                
-                    total_to_pad = max_sequence_length-len(featured_data_words_temp[-1])
-                    if total_to_pad>0:
-                        featured_data_words_temp[-1].extend([padtypes['words'] for item in range(total_to_pad)])             
-                        featured_data_input_ids_temp[-1].extend([padtypes['input_ids'] for item in range(total_to_pad)])  
-                        featured_data_token_types_temp[-1].extend([padtypes['token_type_ids'] for item in range(total_to_pad)])  
-                        featured_data_attention_masks_temp[-1].extend([padtypes['attention_mask'] for item in range(total_to_pad)])  
-                    
-                    ## pad bottom
-                    pad_array = [padtypes['words'] for item in range(max_sequence_length)]
-                    for i in range(max_segments_bert - segments_list[i_doc]):
-                        featured_data_words_temp.append(pad_array)
-                        featured_data_input_ids_temp.append( [padtypes['input_ids'] for item in range(max_sequence_length)])
-                        featured_data_token_types_temp.append( [padtypes['token_type_ids'] for item in range(max_sequence_length)])
-                        featured_data_attention_masks_temp.append( [padtypes['attention_mask'] for item in range(max_sequence_length)])
-                        
-                    #only one label per sequence
-                    featured_data_labels_temp.append(temp_featured_data['labels_ids'][i_doc])
-                        
-            for i_t, test1 in enumerate(featured_data_words_temp):
+            assert max_segments_bert*len(labels_temp) == len(tokens_temp)
+            assert  len(input_ids_temp) == len(tokens_temp)
+            assert  len(token_types_temp) == len(tokens_temp)
+            assert  len(attention_masks_temp) == len(tokens_temp)
+        
+            
+            for i_t, test1 in enumerate(tokens_temp):
                 assert len(test1) == max_sequence_length 
 
-            if clean>0:
-                featured_data_labels_temp = [item for item in featured_data_labels_temp if item is not None]
+            
+            #featured_data_labels_temp = [item for item in featured_data_labels_temp if item is not None]
+            total_clean = len([item for item in temp_featured_data['all_labels'] if item is None])
+            if total_clean >0:
                 temp_featured_data['all_labels'] = [item for item in temp_featured_data['all_labels'] if item is not None]
-
                 temp_featured_data['words'] = [item for item in temp_featured_data['words'] if item is not None] 
                 temp_featured_data['all_metadata'] = [item for item in temp_featured_data['all_metadata'] if item is not None] 
                 temp_featured_data['text'] = [item for item in temp_featured_data['text'] if item is not None] 
                 temp_featured_data['text_lang'] = [item for item in temp_featured_data['text_lang'] if item is not None] 
-                
+            
             if time_grouped_by_company:
                 documents_to_remove = 0
                 print('Removing years that are not in the scope')
@@ -2656,31 +2732,33 @@ class FDExt(Dataset):
                         temp_featured_data['text'][i_metadata]  = None
                         temp_featured_data['text_lang'][i_metadata] = None
                         temp_featured_data['words'][i_metadata]  = None 
-                        featured_data_labels_temp[i_metadata] = None
+                        #featured_data_labels_temp[i_metadata] = None
                         
-                        start_index = start_indexes[item_metadata['document']]
+                        start_index = start_doc_indexes[item_metadata['document']]
                         end_index = start_index + max_segments_bert
                         for i_index in range(start_index, end_index):
-                            featured_data_words_temp[i_index] = None
-                            featured_data_input_ids_temp[i_index] = None
-                            featured_data_token_types_temp[i_index] = None
-                            featured_data_attention_masks_temp[i_index] = None 
+                            tokens_temp[i_index] = None
+                            input_ids_temp[i_index] = None
+                            token_types_temp[i_index] = None
+                            attention_masks_temp[i_index] = None 
                 print('Documents to remove', documents_to_remove)
 
-            print('total to remove:', len([item for item in featured_data_words_temp if item is None]))
-            print('New total:', len([item for item in featured_data_words_temp if item is not None]))
-            self.train.all_tokens = [item for item in featured_data_words_temp if item is not None] 
-            self.train.all_input_ids  = [item for item in featured_data_input_ids_temp if item is not None]
-            self.train.all_segment_ids = [item for item in featured_data_token_types_temp if item is not None]
-            self.train.all_input_mask  = [item for item in featured_data_attention_masks_temp if item is not None]
+            print('total to remove:', len([item for item in tokens_temp if item is None]))
+            print('New total:', len([item for item in tokens_temp if item is not None]))
+            self.train.all_tokens = [item for item in tokens_temp if item is not None] 
+            self.train.all_input_ids  = [item for item in input_ids_temp if item is not None]
+            self.train.all_segment_ids = [item for item in token_types_temp if item is not None]
+            self.train.all_input_mask  = [item for item in attention_masks_temp if item is not None]
 
-            self.train.all_label_ids = [item for item in featured_data_labels_temp if item is not None]
+            self.train.all_label_ids = [self.train.labels2idx.get(item)  for item in temp_featured_data['all_labels'] if item is not None]
             self.train.all_labels = [item for item in temp_featured_data['all_labels'] if item is not None]
 
             self.train.all_words = [item for item in temp_featured_data['words'] if item is not None] 
             self.train.all_metadata = [item for item in temp_featured_data['all_metadata'] if item is not None] 
             self.train.text = [item for item in temp_featured_data['text'] if item is not None] 
             self.train.text_lang = [item for item in temp_featured_data['text_lang'] if item is not None]  
+
+        self.print_lenghts(self.train.__dict__)
 
         self.args_ret['lstm_sequence_length'] = max_segments_bert
         if time_grouped_by_company:
@@ -2705,15 +2783,31 @@ class FDExt(Dataset):
         label_set=[item for item in self.train.all_labels if item is not None]
         #print(label_set)
         print('Counter after preparing data:', Counter(self.train.all_labels))
-        class_weights = compute_class_weight(class_weight ='balanced', classes =np.unique(label_set),  y =label_set)
-        self.train.class_weights_dict = dict(zip(np.unique(label_set), class_weights))
+        class_list = np.unique(label_set)
+        class_weights = self.compute_class_weight(class_weight ='balanced', class_list =class_list,  y_set =label_set)
+        self.train.class_weights_dict = dict(zip(class_list, class_weights))
         self.train.weights = torch.tensor(class_weights,dtype=torch.float)    
         
         self.args_ret['tokenizer'] = tokenizer
 
         return self.args_ret
+    
+    def compute_class_weight(self, class_weight ='balanced', class_list = None, y_set = None):
+        class_dict = {i:item for i, item in enumerate(class_list)}
+        class_count = Counter(y_set)
+        total_sum = len(y_set)
+        class_weights = [0 for item in class_list]
+        if class_weight == 'balanced':
+            for i_class in range(len(class_weights)):
+                class_weights[i_class] = total_sum/(len(class_list)*(class_count[class_dict[i_class]]+0.001))
+        return class_weights
+    
+    def print_lenghts(self, object_print):
+        for item in object_print:
+            if type(object_print[item])==list:
+                print(item, len(object_print[item]))
 
-    def get_grouped_text(self, rows_list, clean_data, remove_numbers, group_level, y_label_type, filter_min_words, additional_headers=[], number_records=None, parallel_workers=1, workload=1,distrib_tool=None):
+    def get_grouped_text(self, rows_list, clean_data, remove_numbers_type, group_level, y_label_type, filter_min_words, additional_headers=[], number_records=None, parallel_workers=1, workload=1,distrib_tool=None):
         if len(rows_list)==0:
             raise Exception('There is no data to group')
 
@@ -2722,6 +2816,7 @@ class FDExt(Dataset):
             elif group_level == 'document': y_label_type = 'file_name' 
             else: y_label_type = 'doc_page'  
 
+        print('Label type:', y_label_type)
         #last_document = rows_list[0]['file_name']
         #last_page = rows_list[0]['page_number']
         #accumulated_text = ''
@@ -2738,8 +2833,10 @@ class FDExt(Dataset):
         for i_document in tqdm.tqdm(range(0,len(document_list), parallel_workers*workload)):
             if parallel_workers ==1:
                 document_name = document_list[i_document]
-                row_list_document = [row for row in rows_list if row['file_name']==document_name]  
-                last_cia_document = self.dataset_last_documents.get(row_list_document[-1]['company_id'])
+                row_list_document = [row for row in rows_list if row['file_name']==document_name]
+                last_cia_document = None
+                if row_list_document[-1].get('company_id') is not None:  
+                    last_cia_document = self.dataset_last_documents.get(row_list_document[-1]['company_id'])
                 temp_metadata, temp_all_words, temp_text_lang, temp_text, temp_all_labels = process_group_by_document(group_level, row_list_document, document_name, filter_min_words, additional_headers, y_label_type, last_cia_document)
                 self.train.all_words.extend(temp_all_words)
                 self.train.all_labels.extend(temp_all_labels)
@@ -2750,13 +2847,17 @@ class FDExt(Dataset):
                 batch_info = []
                 for j_document in  range(0,parallel_workers*workload,workload):
                     worker_list = document_list[i_document+j_document:i_document+j_document+workload]
-                    row_list_documents = [row for row in rows_list if row['file_name'] in worker_list]  
-                    company_names = {item['file_name']:item['company_id'] for item in row_list_documents}
-                    last_cia_documents = {item:self.dataset_last_documents.get(company_names.get(item)) for item in worker_list}
-                    info = {'group_level':group_level, 'row_list_document':row_list_documents, 'document_list': worker_list, 'filter_min_words':filter_min_words, 'additional_headers': additional_headers, 'y_label_type':y_label_type, 'last_cia_documents':last_cia_documents}
-                    batch_info.append(info)
-
-                results = distribute(distrib_tool, batch_info, remote_process_group_by_document, total_workers=parallel_workers)
+                    if len(worker_list) >0: 
+                        row_list_documents = [row for row in rows_list if row['file_name'] in worker_list]  
+                        company_names = {item['file_name']:item.get('company_id') for item in row_list_documents}
+                        last_cia_documents = {item:self.dataset_last_documents.get(company_names.get(item)) for item in worker_list}
+                        info = {'group_level':group_level, 'row_list_document':row_list_documents, 'document_list': worker_list, 'filter_min_words':filter_min_words, 'additional_headers': additional_headers, 'y_label_type':y_label_type, 'last_cia_documents':last_cia_documents}
+                        batch_info.append(info)
+                    else:
+                        break
+                
+                if len(batch_info)>0:
+                    results = distribute(distrib_tool, batch_info, remote_process_group_by_document, total_workers=parallel_workers)
                 
                 for result in results:
                     if len(result)>0:
@@ -2768,17 +2869,18 @@ class FDExt(Dataset):
                         
 
             if number_records is not None and len(self.train.text) >= number_records:
+                print('Reaching maximum number of records (grouped)')
                 break
 
         #if len(self.train.text_lang) > 0:
         #    self.train.text_lang =  temp_text_lang
         #    self.train.text =  temp_text   
 
-        if clean_data or remove_numbers:
+        if clean_data or remove_numbers_type is not None:
             for i_record, record_text in enumerate(self.train.text):
-                self.train.text[i_record] = self.cleanRecord({'text_page':record_text,'remove_numbers':remove_numbers,'normalize':False,'normalization_value':None})
-
-        print('Finishing grouping with', len([item for item in self.train.all_labels if item is not None and len(item)>0]), group_level)
+                record_text = record_text.replace('\n',' \n ').replace('\t',' \t ')
+                self.train.text[i_record] = cleanRecord(original_text = record_text,remove_numbers_type = remove_numbers_type,normalize = False,normalization_value =None) 
+        print('Finishing grouping with', len([item for item in self.train.all_metadata if item is not None]), group_level + "(s)")
 
     def save_training_classes(self, model_dir, training_classes):    
         with open(os.path.join(model_dir,'training_classes.json'),'w') as f:
@@ -2805,7 +2907,17 @@ class FDExt(Dataset):
                     number = str(int(np.abs(self.total_records) /1000)) + "K"
                 else:
                     number = str(np.abs(self.total_records))
-            return os.path.join(self.output_dir, 'dataset_' + number + "_" + suffix + ".pickle")            
+            dataset_name = 'dataset_' + number + "_" + suffix + ".pickle"
+                
+            if self.output_dir is None:
+                return dataset_name
+            else:
+                return os.path.join(self.output_dir, dataset_name)            
+
+    def get_tokenizer(self, tokenizer):
+        if tokenizer is not None and type(tokenizer)==str:
+            tokenizer = BertTokenizer.from_pretrained(tokenizer)
+        return tokenizer
 
     def save_dataset(self, dataset_name = None, save_full_dataset=False):
         if dataset_name is None: 
@@ -2831,7 +2943,9 @@ class FDExt(Dataset):
             with open(file_name, 'rb') as f: 
                 dataset = pickle.load(f)
                 print('Loading dataset from ',file_name)
-                
+                #if dataset.get('args_ret') is not None and dataset['args_ret'].get('tokenizer') is not None: 
+                #    print('Tokenizer dict length:',len(dataset['args_ret']['tokenizer']))
+
             if dataset['is_train']:
                 self.train = dataset['train']
                 self.val = dataset['val']
@@ -2989,10 +3103,11 @@ class FDExt(Dataset):
 
             print('Dataset created with ',  dataset_size, 'records')
 
-        #text_vector = self.train.text if len(self.train.text)>0 else self.train.text_lang
+        #text_vector = self.train.text if len(self.train.text)>0 else self.train.text_lang 
         if group_size is None or group_size == 1:
             total_split = int(dataset_size*split_size)
             total_val = dataset_size - total_split
+            group_size_split = total_split
         else:
             group_size_split = int(len(self.train.text)*split_size)  
             total_split = group_size_split*group_size
@@ -3006,6 +3121,7 @@ class FDExt(Dataset):
             print('Split Parameters: Total', dataset_size, ', Test:', group_size_split)
 
         print('Dataset size:', dataset_size)
+        self.print_lenghts(self.train.__dict__)
         
         if self.train.all_metadata is not None and len(self.train.all_metadata) >0:
             print('Number Documents:', len({item['document'] for item in self.train.all_metadata}))
@@ -3225,6 +3341,11 @@ class FDExt(Dataset):
                 self.test = self.add_yearly_data(dataset_yearly, self.test)
             dataset_yearly = None
 
+        print('train data:')
+        self.print_lenghts(self.train.__dict__)
+        print('val data:')
+        self.print_lenghts(self.val.__dict__)
+
     def add_yearly_data(self, dataset_yearly, base_dataset, self_data=False):
         if len(base_dataset.all_metadata) > 0:
             group_size = int(len(base_dataset.all_input_ids)/len(base_dataset.all_metadata))
@@ -3232,15 +3353,18 @@ class FDExt(Dataset):
             raise Exception('Group size is zero. metadata list = 0')
         if self_data:
             final_data = self.train
+            base_dataset.all_labels = copy.deepcopy(self.train.all_labels)
+            base_dataset.all_label_ids = copy.deepcopy(self.train.all_label_ids)
             #total_metatada = len(self.train.all_metadata)
             #base_dataset.all_labels = []
             #if self.train.all_input_ids is not None:
             #    total_inputs = len(self.train.all_input_ids)
         else:
             final_data = Object()
-            final_data.all_labels, final_data.all_label_ids = base_dataset.all_labels, base_dataset.all_label_ids
+        
         final_data.text, final_data.text_lang, final_data.all_words,  final_data.all_metadata, final_data.all_tokens = [], [], [],[],[]
         final_data.all_input_ids, final_data.all_input_mask, final_data.all_segment_ids = [], [], []
+        final_data.all_labels, final_data.all_label_ids = [], []
         
         total_removed_companies = 0
         for i_company, company_metadata in enumerate(base_dataset.all_metadata):
@@ -3257,13 +3381,11 @@ class FDExt(Dataset):
                     final_data.all_words.append(base_dataset.all_words[i_company])
                     final_data.all_tokens.extend(dataset_yearly[company_id]['all_tokens'])
                     final_data.all_tokens.append(base_dataset.all_tokens[i_company])
-                    #final_data.all_labels.extend(dataset_yearly[company_id]['all_labels'])
-                    #final_data.all_labels.append(base_dataset.all_labels[i_company])
                     final_data.all_metadata.extend(dataset_yearly[company_id]['all_metadata'])
                     final_data.all_metadata.append(base_dataset.all_metadata[i_company])
-                    #final_data.all_label_ids.extend(dataset_yearly[company_id]['all_label_ids'])
-                    #final_data.all_label_ids.append(base_dataset.all_label_ids[i_company])
-                    
+                    assert dataset_yearly[company_id]['all_labels'][0] == base_dataset.all_labels[i_company]
+                    final_data.all_labels.append(base_dataset.all_labels[i_company]) 
+                    final_data.all_label_ids.append(base_dataset.all_label_ids[i_company]) 
                     if base_dataset.all_input_ids is not None and len(base_dataset.all_input_ids)>0:
                         start_group = i_company*group_size
                         end_group = start_group + group_size 
@@ -3350,10 +3472,16 @@ class FDExt(Dataset):
         dataset_final_t1 = []
         if doc_filters.get('type_doc') is not None:
             print('Filtering by type of document', doc_filters['type_doc'])
-            for document in dataset_final_t0:
-                if document.get('document_type') is not None:
-                    if doc_filters.get('type_doc') in document['document_type']:
-                        dataset_final_t1.append(document)
+            if type(doc_filters['type_doc']) ==str:
+                for document in dataset_final_t0:
+                    if document.get('document_type') is not None:
+                        if doc_filters.get('type_doc') in document['document_type']:
+                            dataset_final_t1.append(document)
+            else:
+                for document in dataset_final_t0:
+                    if document.get('document_type') is not None:
+                        if document['document_type'] in doc_filters['type_doc']:
+                            dataset_final_t1.append(document)
             doc_filters.pop('type_doc')
             del dataset_final_t0
             
@@ -3397,9 +3525,9 @@ class FDExt(Dataset):
                                 dataset_final_t3.append(document) 
                                 break
             
-                print('After language by other filter', filter_, Counter([item.get('risk_desc') for item in dataset_final_t3 if item.get('risk_desc') is not None]))
-                print('Number companies', len({item.get('company_id') for item in dataset_final_t3}))
-                print('Number documents', len({item.get('file_name') for item in dataset_final_t3}))
+                    print('After language by other filter', filter_, Counter([item.get('risk_desc') for item in dataset_final_t3 if item.get('risk_desc') is not None]))
+                    print('Number companies', len({item.get('company_id') for item in dataset_final_t3}))
+                    print('Number documents', len({item.get('file_name') for item in dataset_final_t3}))
 
         if not filtered:
             dataset_final_t3 = dataset_final_t2

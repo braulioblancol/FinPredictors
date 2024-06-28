@@ -225,3 +225,34 @@ def getNormalizationAmountPerCompany():
     query += "INNER JOIN nace n ON n.nace_id = c.nace_id "
     query += "GROUP BY doc.company_id "
     return query
+
+def getCompaniesFilteredByAccountMinAmount(min_ammount=500000000, account_number='fid_201'):
+    query = "SELECT DISTINCT l.legal_form_id, l.name as legal_form, c.company_id, c.rcs, c.name as company_name, c.nace_id, n.name as nace,  doc.link, doc.filename, doc.annual_accounts_from "
+    query += "FROM bs_assets_ec bs "
+    query += "INNER JOIN documents doc ON doc.document_id = bs.document_id "
+    query += "INNER JOIN companies c ON c.company_id = doc.company_id "
+    query += "INNER JOIN nace n ON c.nace_id = n.nace_id "
+    query += "INNER JOIN legal_form l ON l.legal_form_id = c.legal_form_id "
+    query += "INNER JOIN (SELECT company_id, MAX(YEAR(filing_date_parsed)) as year "
+    query += "FROM documents doc  "
+    query += "WHERE document_Type_id =3 "
+    query += "GROUP BY company_id) AS temp_docs ON temp_docs.company_id = c.company_id and YEAR(doc.filing_date_parsed) = temp_docs.year "
+    query += f"where  {account_number} > {min_ammount} AND document_Type_id =3 "
+
+    return query
+
+def getAllDocumentLinksForCompanies(company_list):
+    query = "SELECT doc.link FROM documents doc where company_id IN ("
+    query += ",".join(company_list)
+    query += ")"
+
+    return query 
+
+def getFlagDocumentsForFilter(filter):
+    query = "SELECT c.company_id, rcs, doc.document_id, doc.filename, type_info, pages FROM documents_info_log log "
+    query += "INNER JOIN documents_for_processing  dp ON log.document_id = dp.document_id "
+    query += "INNER JOIN documents doc ON doc.document_id = dp.document_id "
+    query += "INNER JOIN companies c ON c.company_id = doc.company_id "
+    query += f"WHERE pages !='1' and type_info like '%{filter}%' "
+
+    return query

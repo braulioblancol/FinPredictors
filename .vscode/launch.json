@@ -5,6 +5,16 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Docker .NET Attach (Preview)",
+            "type": "docker",
+            "request": "attach",
+            "platform": "netCore",
+            "sourceFileMap": {
+                "/src": "${workspaceFolder}"
+            }
+        },
+    
+        {
             "name": "Python: Current File",
             "type": "python",
             "request": "launch",
@@ -48,20 +58,21 @@
                 "--data_dir", "D:\\datasets\\LBR\\dataset_json",
                 "--output_dir", "D:\\datasets\\LBR\\models\\SA\\SA_3year", 
                 "--n_epochs","5",
-                "--batch_size","2",
+                "--batch_size","3",
                 "--max_segments_bert","5",
                 "--labels", "Risk","_No_Risk",
                 "--model_type", "SA",
-                "--perc_data","0.10",
-                "--dense_model_type","4",
-                //"--optimizer","SGD",
-                "--balance_by_class", "-40",
+                "--perc_data","0.20",
+                "--dense_model_type","4", 
+                "--balance_by_class", "-5",
                 "--filter_last_doc", "-2",
-                "--max_files","15",
+                "--max_files","20",
                 "--lstm_hidden_layers","20",
                 "--distrib_tool","pool",
+                "--only_annexes", "True"
                 //"--tokenizer", "D:\\datasets\\LBR\\models\\tokenizers\\small\\local_bert-base-multilingual-uncased",
-                //"--model_dir", "D:\\datasets\\LBR\\models\\tokenizers\\small\\local_bert-base-multilingual-uncased\\bert-base-multilingual-uncased", 
+                //"--model_dir", "D:\\datasets\\LBR\\models\\tokenizers\\small\\local_bert-base-multilingual-uncased\\bert-base-multilingual-uncased",
+                //"--dataset_name","D:\\datasets\\LBR\\dataset_ub9K_2y_s5_annex_train.pickle" 
             ]
         },
         {
@@ -79,13 +90,15 @@
                 "--batch_size","10",
                 "--model_type", "NER",
                 "--perc_data","0.01",
+                "--max_files","6",
                 "--y_top_n","40",
                 "--balance_by_class", "-100",
                 "--number_layers_freeze","8", 
                 "--terms_list","D:\\datasets\\LBR\\dataset_json\\frequent_terms.json",
-                "--model_dir","D:\\models_HPC\\models\\tokenizer_finbert_eng\\tt_dt100_dr10_lr1e5_c5\\bert-base-multilingual-uncased",
-                "--tokenizer","D:\\models_HPC\\models\\tokenizer_finbert_eng\\tt_dt100_dr10_lr1e5_c5",
-                "--normalization_column", "normalization"
+                "--model_dir","D:\\models_HPC\\models\\tokenizer\\tk6Kb_r5_c4_f4_8_rn\\local_bert-base-multilingual-uncased\\bert-base-multilingual-uncased",
+                "--tokenizer","D:\\models_HPC\\models\\tokenizer\\tk6Kb_r5_c4_f4_8_rn\\local_bert-base-multilingual-uncased",
+                "--normalization_column", "normalization",
+                "--dataset_name","D:\\models_HPC\\models\\dataset_ub10K_s1_train.pickle"
             ]
         },
         {
@@ -128,6 +141,27 @@
                 "--perc_data","0.04",
                 "--y_top_n","400",
                 "--balance_by_class", "-100",
+                "--number_layers_freeze","8",
+                "--data_sel_position","last"
+            ]
+        },
+        {
+            "name": "Py: Generate Train data PT",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train_generate_data",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\generated_data", 
+                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
+                "--n_epochs","10",
+                "--batch_size","10",
+                "--model_type", "NER",
+                "--perc_data","0.10",
+                "--y_top_n","400",
+                "--balance_by_class", "500",
                 "--number_layers_freeze","8",
                 "--data_sel_position","last"
             ]
@@ -207,6 +241,19 @@
             ]
         },
         {
+            "name": "Py: Generate Page Type labels",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/labelGenerator.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "genPageTypeAA", 
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\generated_data",  
+                "--perc_data", "0.001"
+            ]
+        },
+        {
             "name": "Py: Generate Bankruptcy Doc labels",
             "type": "python",
             "request": "launch",
@@ -237,14 +284,13 @@
             "args": [
                 "--action", "explain_input",
                 "--data_dir", "D:\\datasets\\LBR\\dataset_json",
-                "--output_dir", "D:\\models_HPC\\models\\NER\\ner_95K_lr3e5_dr10_b30_best", 
-                "--labels_path", "D:\\datasets\\LBR\\NER_eq_list.json", 
-                "--filter_lang","fra",
-                "--perc_data","0.01",
-                "--model_type", "NER",
-                "--y_top_n","9",
-                "--balance_by_class", "-10",   
-                "--model_dir","D:\\models_HPC\\models\\NER\\ner_95K_lr3e5_dr10_b30_best", 
+                "--output_dir", "D:\\models_HPC\\models\\NER\\tbase_NER_ub10K_tk5_c2",//tbase_NER_ub10K_base  
+                "--model_type", "NER", 
+                "--model_dir","D:\\models_HPC\\models\\NER\\tbase_NER_ub10K_tk5_c2", //tbase_NER_ub10K_base
+                "--dataset_name","D:\\models_HPC\\models\\dataset_ub10K_s1_train.pickle",
+                "--total_steps_explain","4",
+                "--total_samples_explain","3",
+                "--tokenizer", "D:\\models_HPC\\models\\tokenizer\\tk6Kb_r5_c4_f4_8_rn\\local_bert-base-multilingual-uncased"
             ]
         },
         {
@@ -359,7 +405,142 @@
                 "--output_dir", "D:\\temp\\"
             ]
         },
-        
+        {
+            "name": "Py: Train Page type AA",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/mainClassifier.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train",
+                "--data_dir", "D:\\datasets\\LBR\\dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\models\\CL\\PT\\",  
+                "--n_epochs","5",
+                "--model_type", "SA",
+                "--perc_data","0.001",
+                "--batch_size","2",
+                "--max_segments_bert","3",
+                "--dense_model_type","3", 
+                "--balance_by_class", "-300", 
+                "--distrib_tool","pool",
+                "--y_label_type","page_type_aa",
+                "--sequence_shift","150"
+                //"--dataset_name","D:\\datasets\\LBR\\dataset_ub10K_s3_train.pickle"
+            ]
+        },
+        {
+            "name": "Py: Train Page type Modifications",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/mainClassifier.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--action", "train",
+                "--data_dir", "D:\\datasets\\LBR\\modifications\\", //"D:\\datasets\\LBR\\output_dataset_json",
+                "--output_dir", "D:\\datasets\\LBR\\models\\CL\\PTMod\\",  
+                "--n_epochs","5",
+                "--model_type", "SA", 
+                "--batch_size","2",
+                "--perc_data","0.10",
+                "--max_segments_bert","1",
+                "--dense_model_type","2",   
+                "--distrib_tool","pool",
+                "--y_label_type","page_type_mod",
+                "--sequence_shift","150",  
+                "--trim_type","random",
+                "--max_files","50",
+                "--dataset_name","D:\\datasets\\LBR\\models\\CL\\PTMod\\train_dataset_s3.pickle"
+                //"--dataset_name","D:\\datasets\\LBR\\dataset_ub10K_s3_train.pickle"
+            ]
+        },
+        {
+            "name": "Py: Info Textual Search Accountants",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/InfoTextualSearcher.py",
+            "console": "integratedTerminal",
+            "args": [ 
+                "--data_dir", "E:\\LBR\\", 
+                "--output_filepath", "D:\\datasets\\LBR\\auditors_per_document.txt",
+                "--filter_type_doc","Modification","Registration",
+                "--text_search_list","D:\\datasets\\LBR\\audit_dataset_lux.pickle",
+                "--set_to_search","auditors:"
+            ]
+        },
+        {
+            "name": "Py: Info Textual Search Firms",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/InfoTextualSearcher.py",
+            "console": "integratedTerminal",
+            "args": [ 
+                "--data_dir", "E:\\LBR\\", 
+                "--output_filepath", "D:\\datasets\\LBR\\auditfirms_per_document.txt",
+                "--filter_type_doc","Modification","Registration",
+                "--text_search_list","D:\\datasets\\LBR\\audit_dataset_lux.pickle",
+                "--set_to_search","firms"
+            ]
+        },
+        {
+            "name": "Py: Info Textual Search Various",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/InfoTextualSearcher.py",
+            "console": "integratedTerminal",
+            "args": [ 
+                "--data_dir", "E:\\LBR", 
+                "--output_filepath", "D:\\datasets\\LBR\\various_per_document.txt",
+                "--filter_type_doc","Modification","Registration",
+                "--text_search_list","D:\\datasets\\LBR\\search_data_list.txt"
+            ]
+        },    
+        {
+            "name": "Py: Query DB to Excel",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/fileGenerator.py",
+            "console": "integratedTerminal",
+            "args": [ 
+                "--action", "Excel",  
+                "--output_file", "D:\\temp\\companies500m_210.xlsx",   
+                "--account_number","fid_201", 
+                "--min_amount","500000000"
+            ]
+        },    
+        {
+            "name": "Py: Query Audited Companies",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/fileGenerator.py",
+            "console": "integratedTerminal",
+            "args": [ 
+                "--action", "audited_companies",
+                "--output_file", "D:\\temp\\companies500m_210_audited_info.xlsx"
+            ]
+        },     
+        {
+            "name": "Py: Query DB to links",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/fileGenerator.py",
+            "console": "integratedTerminal",
+            "args": [ 
+                "--action", "links",  
+                "--output_file", "D:\\temp\\companies500m_210.txt",   
+                "--account_number","fid_201", 
+                "--min_amount","500000000"
+            ]
+        }, 
+        {
+            "name": "Py: Run Service FinPredictor",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/rest_services.py",
+            "console": "integratedTerminal",
+            "args": [   
+                "--model_path", "D:\\models_HPC\\models\\PTPM\\ptpm_fr8_m0_s3",     
+            ]
+        }     
 
     ]
 }

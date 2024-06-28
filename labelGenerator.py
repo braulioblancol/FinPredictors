@@ -1,5 +1,5 @@
 import argparse
-from SQLConnector import SQLConnector
+from DBConnector import SQLConnector
 import _queries
 import math
 import json
@@ -236,6 +236,73 @@ def generateNormalizationAmountsPerCia(output_dir):
 
     print('Saved file: ' + output_file)
 
+def generatePageType(data_dir, output_dir,perc_data,parallel_workers,distibution_tool,worker_workload):  
+    oDataset = FDExt(data_dir, output_dir, action='train', total_records=None,dataset_name=None)
+    oDataset.loadDataset(filter_last_doc=None, filter_type_doc='eCDF',  additional_filters = None, perc_data=perc_data, labels_path=None, data_sel_position='first', filter_lang=None,max_number_files=None)
+    oDataset.get_grouped_text(rows_list=oDataset.dataset, clean_data=False, remove_numbers=False, group_level='page', y_label_type=None, filter_min_words=None, additional_headers = None,parallel_workers=parallel_workers, distrib_tool=distibution_tool, workload=worker_workload)
+    labels = []
+    lang_formats = []
+    document_dict = {item['document']:None for item in oDataset.train.all_metadata}
+    for i, page_text in enumerate (oDataset.train.all_words):
+        document = oDataset.train.all_metadata[i]['document']
+        if document_dict.get(document) is None:
+            document_dict[document] = i
+            page_set = [oDataset.train.all_words[i] for i,item in enumerate(oDataset.train.all_metadata) if item['document']==document]
+            full_text = ' '.join(page_set)
+            last_label = 'unknown'
+            lang_fin_statement = check_financial_statement(full_text) 
+            if lang_fin_statement is not None:          
+                for page_text in page_set:   
+                    lang_formats.append(lang_fin_statement)
+                    if len(full_text.strip())<10:
+                        labels.append('blank')
+                        continue 
+                    lang_page_financial_statement = check_financial_statement(page_text) 
+                    if lang_page_financial_statement is not None: #'6lb40D, 35m0mX
+                        if 'bilan' in page_text.replace('é','e').replace('á','a') or \
+                            'balance sheet'  in page_text or \
+                             'bilanz' in page_text:
+                            last_label = 'balance_sheet'
+                        elif 'profits et pertes' in page_text.replace('é','e').replace('á','a') or \
+                            'profit and loss'  in page_text or \
+                             ('gewinn'  in page_text and 'verlustrechnung'  in page_text): 
+                            last_label = 'profit_and_loss'
+                        elif last_label =='unknown':
+                            last_label = 'unknown_financial_statement'
+                    else:
+                        if last_label != 'unknown':
+                            last_label = 'annex'
+                    labels.append(last_label)
+            else:
+                for page_text in page_set:
+                    labels.append('')
+                    lang_formats.append(lang_fin_statement)
+        
+    assert len(labels)==len(oDataset.train.all_words)
+    assert len(labels)==len(lang_formats)
+
+    output_file = os.path.join(output_dir, "text_line_page_type_aa2.txt")
+    with open(output_file,"w") as f:
+        final_text = "file_name\tpage_number\tpage_type_aa\tlang_format_aa\n"
+        for i,label in enumerate(labels):
+            metadata_info = oDataset.train.all_metadata[i]
+            lang_fs = lang_formats[i] if lang_formats[i] is not None else ''
+            final_text += str(metadata_info['document']) + '\t' + str(metadata_info['page']) + '\t' + str(label) + '\t' + lang_fs + '\n'
+        f.write(final_text)
+
+    print('Saved file: ' + output_file)
+
+
+            
+
+def check_financial_statement(text):
+    if 'Les notes figurant en annexe font partie intégrante des comptes annuels'.lower()  in text:
+        return 'fra'
+    if 'The notes in the annex form an integral part of the annual accounts'.lower()  in text:
+        return 'eng'
+    if 'Die Anhänge sind integraler Bestandteil der Jahresabschlüsse'.lower() in text:
+        return 'deu'
+    return None
 
 def generateLinksGapDocs(docs_gap_path, output_dir,batch_size = 5000):
     
@@ -311,8 +378,32 @@ if __name__ =='__main__':
         default=None,
         type=str,
         required=False, )
+    
+    parser.add_argument(
+        "--parallel_workers",
+        default=1,
+        type=int,
+        required=False, )    
 
+    parser.add_argument(
+        "--distibution_tool",
+        default='mp',
+        type=str,
+        required=False, )
 
+    
+    parser.add_argument(
+        "--worker_workload",
+        default=1,
+        type=int,
+        required=False, )  
+    
+    parser.add_argument(
+        "--perc_data",
+        default=1,
+        type=float,
+        required=False, )
+      
     args = parser.parse_args()
 
     if args.action =='risk_label_cia':
@@ -337,3 +428,5 @@ if __name__ =='__main__':
         splitDocumentLinks(args.data_dir, args.links_per_file, args.output_dir)
     elif args.action =='genDocNoramlize':
         generateNormalizationAmountsPerCia(args.output_dir)
+    elif args.action =='genPageTypeAA':
+        generatePageType(args.data_dir, args.output_dir, args.perc_data,args.parallel_workers,args.distibution_tool,args.worker_workload)

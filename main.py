@@ -3,7 +3,7 @@ from nlpde import FDExt
 import numpy as np
 import os
 from sentimentModel import runSentimentModel, runROCAnalysis 
-from CustomExplainer import CustomBERTExplainer
+#from CustomExplainer import CustomBERTExplainer
 import json
 from pathlib import Path
 
@@ -173,6 +173,12 @@ def run():
         default=10,
         type=int,
         required=False, )
+    
+    parser.add_argument(
+        "--number_layers_unfreeze",
+        default=None,
+        type=int,
+        required=False, )
 
     parser.add_argument(
         "--data_sel_position",
@@ -263,21 +269,40 @@ def run():
         help="If only consider financial annexes", )
     
     parser.add_argument(
-        "--max_samples",
+        "--total_samples_explain",
         default=10,
         type=int,
         required=False, )
         
     parser.add_argument(
-        "--total_steps",
+        "--total_steps_explain",
         default=2,
         type=int,
-        required=False, )
-
+        required=False, ) 
+    
     parser.add_argument(
         "--max_significant_words",
         default=10,
         type=int,
+        required=False, )
+    
+    parser.add_argument(
+        "--parallel_workers",
+        default=10,
+        type=int,
+        required=False, )
+    
+    
+    parser.add_argument(
+        "--trim_type",
+        default="start",
+        type=str,
+        required=False, )
+    
+    parser.add_argument(
+        "--run_id",
+        default=None,
+        type=str,
         required=False, )
         
     args = parser.parse_args()    
@@ -312,7 +337,7 @@ def run():
         
         if raw_loaded:            
             print('Preparing')
-            oDataset.prepare_input_data(model_dir=args.output_dir, model_type =args.model_type, group_level=None, y_label_type=args.y_label_type, labels = args.labels, y_top_n=args.y_top_n, trim_begining=False,tokenizer=args.tokenizer,sequence_strategy=args.sequence_strategy, sequence_shift=args.sequence_shift, max_segments_bert=args.max_segments_bert, terms_filter_path=args.terms_list, clean_data=args.clean_data, remove_numbers=args.remove_numbers,time_grouped_by_company=time_grouped_by_company, normalization_column=args.normalization_column, worker_workload=args.worker_workload,distibution_tool=args.distrib_tool)
+            oDataset.prepare_input_data(model_dir=args.output_dir, model_type =args.model_type, group_level=None, y_label_type=args.y_label_type, labels = args.labels, y_top_n=args.y_top_n, trim_type=args.trim_type,tokenizer=args.tokenizer,sequence_strategy=args.sequence_strategy, sequence_shift=args.sequence_shift, max_segments_bert=args.max_segments_bert, terms_filter_path=args.terms_list, clean_data=args.clean_data, remove_numbers=args.remove_numbers,time_grouped_by_company=time_grouped_by_company, normalization_column=args.normalization_column, worker_workload=args.worker_workload,distibution_tool=args.distrib_tool, parallel_workers=args.parallel_workers)
             oDataset.splitDataset(shuffle = True, split_size=split_size, preserve_lang=True, balance_by_class=args.balance_by_class, balance_error=args.balance_error,time_grouped_by_company=time_grouped_by_company)
             oDataset.save_dataset()
                     
@@ -332,23 +357,26 @@ def run():
             '''
             return    
         print('Finalized preparing data.')
-        
+        tokenizer = oDataset.args_ret['tokenizer'] if args.tokenizer is None else args.tokenizer 
         runSentimentModel(dataset=oDataset,action=args.action,data_dir=args.data_dir,output_dir=args.output_dir,learning_rate=args.learning_rate,
                         batch_size=args.batch_size, n_epochs=args.n_epochs, is_bert_lstm=oDataset.args_ret['is_bert_lstm'], 
                     lstm_sequence_length=oDataset.args_ret['lstm_sequence_length'], lstm_hidden_layers = args.lstm_hidden_layers, lstm_stacked_layers=oDataset.args_ret['lstm_stacked_layers'],
-                    fast_break=args.fast_break, model_type = args.model_type, tokenizer = oDataset.args_ret['tokenizer'], debug_gpu_memory=args.debug_gpu_memory, optimizer=args.optimizer, 
-                    dropout_perc=args.dropout_perc, number_layers_freeze = args.number_layers_freeze,local_model_location=args.model_dir, dense_model_type=args.dense_model_type)
+                    fast_break=args.fast_break, model_type = args.model_type, tokenizer = tokenizer, debug_gpu_memory=args.debug_gpu_memory, optimizer=args.optimizer, 
+                    dropout_perc=args.dropout_perc, number_layers_freeze = args.number_layers_freeze, local_model_location=args.model_dir, dense_model_type=args.dense_model_type,
+                    run_id=args.run_id)
 
     elif args.action == 'roc':
         runROCAnalysis(args.data_dir, args.output_dir, title=args.title)
 
     elif args.action == 'explain_input':
-        oExplainer = CustomBERTExplainer(model=args.model_dir, tokenizer="bert-base-multilingual-uncased",type_model='custom')
-        oExplainer.explain_model_input(args.data_dir, args.output_dir, max_samples=args.max_samples, total_steps=args.total_steps, dataset_name=args.dataset_name,max_significant_words=args.max_significant_words)
+        tokenizer = "bert-base-multilingual-uncased" if args.tokenizer is None else   args.tokenizer
+        oExplainer = CustomBERTExplainer(model=args.model_dir, tokenizer=tokenizer,type_model='custom')
+        oExplainer.explain_model_input(args.data_dir, args.output_dir, max_samples=args.total_samples_explain, total_steps=args.total_steps_explain, dataset_name=args.dataset_name,max_significant_words=args.max_significant_words, tokenizer=tokenizer)
 
     elif args.action == 'explain_layer':
-        oExplainer =  CustomBERTExplainer(model=args.model_dir, tokenizer="bert-base-multilingual-uncased",type_model='custom')
-        oExplainer.explain_model_layers(args.data_dir, args.model_dir, args.output_dir,args.filter_last_doc,args.labels_path,args.perc_data,args.filter_lang,args.model_type,args.y_label_type,args.y_top_n,args.tokenizer,args.sequence_strategy,args.remove_stopwords,args.sequence_shift,args.max_segments_bert,args.terms_list,args.clean_data,args.remove_numbers,time_grouped_by_company, max_samples=10, total_steps=20)
+        tokenizer = "bert-base-multilingual-uncased" if args.tokenizer is None else   args.tokenizer
+        oExplainer =  CustomBERTExplainer(model=args.model_dir, tokenizer=tokenizer,type_model='custom')
+        oExplainer.explain_model_layers(args.data_dir, args.model_dir, args.output_dir,args.filter_last_doc,args.labels_path,args.perc_data,args.filter_lang,args.model_type,args.y_label_type,args.y_top_n,args.tokenizer,args.sequence_strategy,args.remove_stopwords,args.sequence_shift,args.max_segments_bert,args.terms_list,args.clean_data,args.remove_numbers,time_grouped_by_company, max_samples=args.total_samples_explain, total_steps=args.total_steps_explain)
     
     elif args.action == 'measure_models':
         datamodels_list = []

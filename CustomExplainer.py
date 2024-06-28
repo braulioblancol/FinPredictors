@@ -17,7 +17,7 @@ class CustomBERTExplainer:
     def __init__(self, model=None, tokenizer=None, type_model='custom', is_train=False, number_layers_freeze=0): 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  
         if type(model) == str and type_model=='custom':
-            self.model = CustomBERTModel().from_pretrained(model_dir=model) 
+            self.model = CustomBERTModel(tokenizer=tokenizer, local_model_location=model, transfer_weights=False).from_pretrained(model_dir=model) 
         else:
             self.model = model
         if type(tokenizer)==str and type_model=='custom':
@@ -69,10 +69,10 @@ class CustomBERTExplainer:
         return pred.max(1).values
 
     def summarize_attributions(self, attributions, input_tokens, sequence_length, stacked_layers, sequence_shift): #TODO: return also the unified tokens of each group
+        tokens_per_group = []
+        attributions_per_group = []   
         if sequence_length * stacked_layers >1:
             total_shift = len(input_tokens[0]) - 1 - sequence_shift
-            attributions_per_group = []
-            tokens_per_group = []
             for group_id in range(stacked_layers):
                 current_tokens = [] 
                 concat_attrib =  torch.tensor([])
@@ -101,18 +101,19 @@ class CustomBERTExplainer:
                 attributions_per_group.append(concat_attrib / torch.norm(concat_attrib))
                 tokens_per_group.append(current_tokens)
         else:
-            sep_index = [i for i, item in enumerate(input_tokens[record_id]) if item =='[SEP]']
+            record_id =0
+            sep_index = [i for i, item in enumerate(input_tokens[record_id]) if item =='[SEP]'][0]
             tokens_per_group.append(input_tokens[record_id][1:sep_index]) 
             attributions_group = attributions[record_id].sum(dim=-1).squeeze(0)[1:sep_index]  
             attributions_per_group.append(attributions_group /  torch.norm(attributions_group)) # norm = sqrt(sum(square(x)))
 
         return attributions_per_group, tokens_per_group
     
-    def explain_model_input(self, data_dir, output_dir, max_samples, total_steps, dataset_name, max_significant_words=2):
+    def explain_model_input(self, data_dir, output_dir, max_samples, total_steps, dataset_name, max_significant_words=2, tokenizer=None):
         oDataset = FDExt(data_dir, output_dir, dataset_name=dataset_name)
         oDataset.loadDataset() 
         #args_ret = oDataset.prepare_input_data(model_dir= model_dir, model_type = model_type, group_level=None, y_label_type=y_label_type, labels=None, y_top_n=y_top_n, trim_begining=False,tokenizer=tokenizer,sequence_strategy=sequence_strategy, sequence_shift=sequence_shift, max_segments_bert=max_segments_bert, terms_filter_path=terms_list, clean_data=clean_data, remove_numbers=remove_numbers,time_grouped_by_company=time_grouped_by_company)
-        self.tokenizer = oDataset.args_ret['tokenizer'] 
+        self.tokenizer = oDataset.args_ret['tokenizer']  if tokenizer is None else BertTokenizer.from_pretrained(tokenizer)
         ig = LayerIntegratedGradients(self.explainable_pos_forward_func, self.model.bert.embeddings)
         
         oDataset.val.idx2labels = oDataset.train.idx2labels
@@ -122,15 +123,30 @@ class CustomBERTExplainer:
         total_labels = 0
         #vis_data_records = []    
         class_results = {}
+        top_significant_words = {}
+        bottom_significant_words = {}
         recordset_size = oDataset.args_ret['lstm_stacked_layers']*oDataset.args_ret['lstm_sequence_length']
-        for i_input  in range(0,len(oDataset.val.all_tokens),recordset_size):
-            input_tokens = oDataset.val.all_tokens[i_input:i_input+recordset_size]
-            masks=  torch.tensor(oDataset.val.all_input_mask[i_input:i_input+recordset_size]).to(self.device).long()
-            token_types= torch.tensor(oDataset.val.all_segment_ids[i_input:i_input+recordset_size]).to(self.device).long()
+        for i_input  in range(0,len(oDataset.val.text),recordset_size):
+            if recordset_size ==1:
+                text = oDataset.val.text[i_input].replace("'"," ")
+                encoded_text =  self.tokenizer.encode_plus(text) 
+                tokenized_text = self.tokenizer.tokenize(text)
+                if len(tokenized_text) >510:
+                    continue
+                input_tokens = [['[CLS]'] + tokenized_text + ['[SEP]']]
+                masks=  torch.tensor([encoded_text.data['attention_mask']]).to(self.device).long()
+                token_types= torch.tensor([encoded_text.data['token_type_ids']]).to(self.device).long()
+            else:
+                input_tokens = oDataset.val.all_tokens[i_input:i_input+recordset_size]
+                masks=  torch.tensor(oDataset.val.all_input_mask[i_input:i_input+recordset_size]).to(self.device).long()
+                token_types= torch.tensor(oDataset.val.all_segment_ids[i_input:i_input+recordset_size]).to(self.device).long()
             label =oDataset.val.all_label_ids[i_input:i_input+oDataset.args_ret['lstm_stacked_layers']]
             gt_label = oDataset.val.idx2labels[label[0]]
             if class_results.get(gt_label) is None or len(class_results[gt_label]) < max_samples_per_label:
-                input_ids = oDataset.val.all_input_ids[i_input:i_input+recordset_size]
+                if recordset_size ==1:
+                    input_ids = [encoded_text.data['input_ids']]
+                else:
+                    input_ids = oDataset.val.all_input_ids[i_input:i_input+recordset_size]
                 input_ids = torch.tensor(input_ids).to(self.device)
                 input_ids = input_ids.long()
 
@@ -142,10 +158,8 @@ class CustomBERTExplainer:
                 output_pred = self.model(input_ids, attention_mask=masks, token_type_ids=token_types, return_logits=True)
                 pred = output_pred.argmax().item()
                 predicted_label = oDataset.val.idx2labels[pred]
-                max_samples_per_label = int(max_samples/len(oDataset.val.idx2labels))
+                max_samples_per_label = max(1,int(max_samples/len(oDataset.val.idx2labels)))
 
-                top_significant_words = {}
-                bottom_significant_words = {}
 
                 if pred == label[0]:
                     attributions, delta = ig.attribute(inputs=(input_ids, token_types),
@@ -232,7 +246,7 @@ class CustomBERTExplainer:
     def explain_model_layers(self, data_dir, model_dir, output_dir, filter_last_doc,labels_path,perc_data,filter_lang,model_type,y_label_type,y_top_n,tokenizer,sequence_strategy,remove_stopwords,sequence_shift,max_segments_bert,terms_list,clean_data,remove_numbers,time_grouped_by_company, max_samples, total_steps, dataset_name=None):
         oDataset = FDExt(data_dir, output_dir,dataset_name=dataset_name)
         oDataset.loadDataset(filter_last_doc=filter_last_doc, filter_type_doc='eCDF', additional_filters={'page_type':['Unknown','']},perc_data=perc_data, labels_path=labels_path, data_sel_position='last', filter_lang=filter_lang) 
-        args_ret = oDataset.prepare_input_data(action='test', model_dir= model_dir, model_type = model_type, group_level=None, y_label_type=y_label_type,y_top_n=y_top_n, trim_begining=False,tokenizer=tokenizer,sequence_strategy=sequence_strategy, remove_stopwords= remove_stopwords, sequence_shift=sequence_shift, max_segments_bert=max_segments_bert, terms_filter_path=terms_list, clean_data=clean_data, remove_numbers=remove_numbers,time_grouped_by_company=time_grouped_by_company)
+        args_ret = oDataset.prepare_input_data(action='test', model_dir= model_dir, model_type = model_type, group_level=None, y_label_type=y_label_type,y_top_n=y_top_n, trim_type="end",tokenizer=tokenizer,sequence_strategy=sequence_strategy, remove_stopwords= remove_stopwords, sequence_shift=sequence_shift, max_segments_bert=max_segments_bert, terms_filter_path=terms_list, clean_data=clean_data, remove_numbers=remove_numbers,time_grouped_by_company=time_grouped_by_company)
         self.tokenizer = args_ret['tokenizer'] 
         
         #layer_attrs_dist = []

@@ -31,20 +31,34 @@ class SQLConnector:
 
 class PostgresConnector:
     
-    def get_postgres_conn():
-        pwd = _parameters.POSTGRES_PASSWORD
-        uid = _parameters.POSTGRES_USER
-        server = _parameters.POSTGRES_SERVER
-        port = _parameters.POSTGRES_PORT
-        db = _parameters.POSTGRES_DATABASE
-        try:
-            connection_string = f'postgresql://{uid}:{pwd}@{server}:{port}/{db}' 
-            print(f'postgres server:{server}, user: {uid}, pwd:{pwd}, connection string {connection_string}')
-            cs = create_engine(connection_string)
+    def get_postgres_conn(context=None,idle_timeout=3600):
+        pwd = os.environ['POSTGRES_PASSWORD']
+        uid = os.environ['POSTGRES_USER']
+        server = os.environ['POSTGRES_SERVER']
+        port = 5432
+        db = os.environ['POSTGRES_DB']
+        return PostgresConnector.get_generic_postgres_conn(context,server,port,db,uid,pwd,idle_timeout=idle_timeout)
+
+    def get_generic_postgres_conn(context, server, port, db, uid, pwd, idle_timeout):
+        try: 
+            statement_timeout = idle_timeout*1000
+            connection_string = (
+                f'postgresql://{uid}:{pwd}@{server}:{port}/{db}?'
+                f'connect_timeout={idle_timeout}&'
+                f'options=-c%20statement_timeout={statement_timeout}%20'
+                f'-c%20idle_in_transaction_session_timeout={statement_timeout}'
+            ) 
+            if context is not None:
+                context.log.info(f'postgres server:{server}, user: {uid}, pwd:{pwd}, connection string {connection_string}')
+            cs = create_engine(connection_string,  
+                pool_recycle=idle_timeout, # idle connections will be terminated after 10 minutes
+                pool_size=5, #pool size under normal conditions
+                max_overflow=5 #additional connections when pool size is exeeded
+            )
             return cs
         except Exception as ex:
             raise ex
-        
+    
     def executeQuery(self, query):
         alchemy_engine = PostgresConnector.get_postgres_conn()
         with alchemy_engine.connect() as conn:

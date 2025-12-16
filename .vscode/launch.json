@@ -540,7 +540,80 @@
             "args": [   
                 "--model_path", "D:\\models_HPC\\models\\PTPM\\ptpm_fr8_m0_s3",     
             ]
-        }     
+        } , 
+        {
+            "name": "Py: Run Fixer BERT MLM",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/BERTFixerModel.py",
+            "console": "integratedTerminal",
+            "args": [   
+                "--data_dir", "D:\\PHD TEMP\\LBR\\ocr\\MD0",  
+                "--output_dir", "D:\\PHD TEMP\\LBR\\models\\MLM",  
+                "--action","train",
+                "--model_type","MLM",
+                "--number_records","100",
+                "--split_size","0.70"   
+            ]
+        }   , 
+        {
+            "name": "Py: Run Fixer BERT LSTM",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/BERTFixerModel.py",
+            "console": "integratedTerminal",
+            "args": [   
+                "--data_dir", "D:\\PHD TEMP\\LBR\\ocr\\MD0",  
+                "--output_dir", "D:\\PHD TEMP\\LBR\\models\\LSTM", 
+                "--action","train", 
+                "--model_type","LSTM",
+                "--number_records","100",
+                "--split_size","0.70",
+                "--max_bert_length","110" 
+            ]
+        }, 
+        {
+            "name": "Py: Predict BERT MLM",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/BERTFixerModel.py",
+            "console": "integratedTerminal",
+            "args": [      
+                "--output_dir", "D:\\PHD TEMP\\LBR\\models\\MLM",  
+                "--action","predict",
+                "--model_type","MLM", 
+                "--text","Here is a te5t",
+                "--max_input_length","110"
+            ]
+        }, 
+        {
+            "name": "Py: Predict BERT LSTM",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/BERTFixerModel.py",
+            "console": "integratedTerminal",
+            "args": [      
+                "--output_dir", "D:\\PHD TEMP\\LBR\\models\\LSTM",  
+                "--action","predict",
+                "--model_type","LSTM", 
+                "--text","Here is a te5t",
+                "--max_input_length","110"
+            ]
+        },
+        {
+            "name": "Py: Flask API multisegment BERT",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/service_multiseg_bert.py",
+            "console": "integratedTerminal",
+            "args": ["--model_dir", "D:\\PryYoba\\models\\page_type_predictor2"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "FLASK_APP": "service_multiseg_bert.py",
+                "FLASK_ENV": "development",
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
 
     ]
 }

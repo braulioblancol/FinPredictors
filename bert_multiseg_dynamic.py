@@ -405,6 +405,7 @@ class PageTypeInference:
     def __init__(self, model_dir=GLOBAL_BEST_DIR):
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f'Loading in {self.device}')
         self.model_dir = model_dir
 
         # Load metadata
